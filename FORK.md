@@ -55,26 +55,9 @@ Uses:
 
 A `dense` value may itself be a JSON object (structured prompts); it is passed to the model as compact JSON.
 
-Two more entry types, for teaching a **trigger word** (example: `docs/fork/trigger_example.jsonl`):
-
-```json
-{"trigger": "Taras Shevchenko",
- "description": ["a bald middle-aged man with a long drooping mustache, ...", "another wording of the same look"],
- "contexts": ["{subject} reading a book in a garden", "an oil painting of {subject}"],
- "contexts_file": "contexts_person.txt",
- "generic": "a middle-aged man"}
-{"preserve": ["a woman reading a book in a garden", "a cat sleeping on a windowsill"]}
-```
-
-- Every context × description gives one pair: short = context with `{subject}` → trigger, dense = the same context
-  with `{subject}` → description. Many varied contexts teach the trigger itself rather than one fixed scene.
-- `contexts_file` (one context per line, `#` comments, path relative to the prompts file) and `contexts` are combined.
-- `generic` adds, per context, a pair where the prompt with the generic words is its own target. This keeps
-  "a middle-aged man" meaning what it meant before, so the concept does not bleed into every man.
-- `preserve` entries do the same for any prompt you want to stay unchanged.
-
-The preset `#anima LoRA trigger distillation` runs the example file. Good sample prompts: a trigger prompt that is
-**not** in the contexts, the same prompt with the generic words, and an unrelated prompt.
+A pair with the same prompt twice keeps that prompt like the base model (useful against concept bleeding,
+e.g. `"a middle-aged man on a bench"` → itself next to `"Taras Shevchenko on a bench"` → description).
+Generating pairs (templates, LLM rewrites) is a job for a preparation script, not the trainer.
 
 ### Running
 
@@ -119,8 +102,9 @@ Every distillation step costs one teacher forward (no gradients) plus one studen
 
 ### What to watch
 
-- TensorBoard `loss/context_distillation` should go down. `context_distillation/teacher_latents_generated`
-  shows that the pool refreshes.
+- TensorBoard `loss/context_distillation` should go down. `context_distillation/loss_{high,mid,low}_noise`
+  split it by noise level (sigma > 2/3, 1/3–2/3, < 1/3): high noise is where composition and identity are
+  decided, low noise only refines details. In standalone mode `loss/train_step` is the same curve.
 - Samples: add sample prompts using the **short** prompts (they should move toward the dense content), and one
   prompt that is **not** in the file (it should stay like the base model).
 

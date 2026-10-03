@@ -152,7 +152,7 @@ def run(cd_enabled, standalone, expected_steps, fused_back_pass=False):
             if k in base:
                 assert torch.equal(v, base[k]), f"base weight changed: {k}"
         if cd_enabled:
-            assert trainer.extensions[0]._generated >= 2
+            assert len(trainer.extensions[0].pool) == 2
         trainer.tensorboard.close()
     print(f"cd={cd_enabled} standalone={standalone} fused_back_pass={fused_back_pass}: {expected_steps} steps OK")
 

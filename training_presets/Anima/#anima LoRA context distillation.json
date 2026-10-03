@@ -48,5 +48,6 @@
         "negative_prompt": "",
         "target_cfg": 1.0,
         "seed": 42
-    }
+    },
+    "learning_rate_warmup_steps": 20
 }

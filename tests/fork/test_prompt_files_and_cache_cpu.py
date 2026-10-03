@@ -1,6 +1,6 @@
 """
 Run: python -m tests.fork.test_prompt_files_and_cache_cpu
-  - prompt file entry types (pair / preserve / trigger with contexts, descriptions, generic)
+  - prompt pairs file
   - sample prompt embedding cache (hit skips encode(), disabled while the text encoder trains)
 """
 import json
@@ -16,24 +16,15 @@ import torch
 
 def test_prompt_file():
     with tempfile.TemporaryDirectory() as tmp:
-        with open(os.path.join(tmp, "contexts.txt"), "w") as f:
-            f.write("# comment\nportrait of {subject}\n\n{subject} in a garden\n")
         path = os.path.join(tmp, "pairs.jsonl")
         with open(path, "w") as f:
             f.write(json.dumps({"short": "s", "dense": {"k": "v"}}) + "\n")
-            f.write(json.dumps({"preserve": ["a cat", "a dog"]}) + "\n")
-            f.write(json.dumps({"trigger": "T", "description": ["d1", "d2"], "contexts": ["{subject} at night"],
-                                "contexts_file": "contexts.txt", "generic": "a man"}) + "\n")
+            f.write("\n")
+            f.write(json.dumps({"short": "a cat", "dense": "a cat"}) + "\n")
+            f.write(json.dumps({"prompt": "p", "dense_prompt": "d"}) + "\n")
+            f.write(json.dumps({"short": "incomplete"}) + "\n")
         pairs = load_prompt_pairs(path)
-
-    assert pairs[0] == ("s", '{"k": "v"}')
-    assert pairs[1:3] == [("a cat", "a cat"), ("a dog", "a dog")]
-    trigger_pairs = pairs[3:]
-    # 3 contexts x (2 descriptions + 1 generic)
-    assert len(trigger_pairs) == 9, trigger_pairs
-    assert ("T at night", "d1 at night") in trigger_pairs
-    assert ("portrait of T", "portrait of d2") in trigger_pairs
-    assert ("a man in a garden", "a man in a garden") in trigger_pairs
+    assert pairs == [("s", '{"k": "v"}'), ("a cat", "a cat"), ("p", "d")], pairs
     print("prompt file OK")
 
 

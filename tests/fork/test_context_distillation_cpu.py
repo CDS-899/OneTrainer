@@ -143,6 +143,7 @@ def test_mechanics():
         progress = TrainProgress()
         loss = ext.compute_loss(trainer, None, progress)
         loss.backward()
+        assert sum(ext._band_count.values()) == config.context_distillation.batch_size
         assert all(p.grad is None for p in model.transformer.parameters() if not is_lora(model, p))
         assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.transformer_lora.parameters())
 
