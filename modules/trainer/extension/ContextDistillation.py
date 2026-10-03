@@ -27,11 +27,76 @@ def _as_text(value) -> str:
     return str(value)
 
 
+SUBJECT_PLACEHOLDER = "{subject}"
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def _read_lines(path: str) -> list[str]:
+    with open(path, encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
+
+
+def _expand_object(obj: dict, base_dir: str) -> list[tuple[str, str]]:
+    """
+    Turns one entry of the prompts file into (short, dense) pairs.
+
+    Plain pair:      {"short": "...", "dense": "..."}
+    Preservation:    {"preserve": "a man reading a book"}   -> short == dense, keeps this prompt like the base model
+    Trigger concept: {"trigger": "Taras Shevchenko",
+                      "description": "a bald man with a long drooping mustache, ..."   (or a list of descriptions),
+                      "contexts": ["{subject} reading a book in a garden", ...],      (and/or "contexts_file")
+                      "generic": "an old man"}                                         (optional, or a list)
+        For every context and description:  short = context with {subject} -> trigger,
+                                             dense = context with {subject} -> description.
+        With "generic", every context also yields a preservation pair with {subject} -> generic, so the
+        LoRA learns that only the trigger changes and the generic words keep their base meaning.
+    """
+    pairs = []
+
+    if "trigger" in obj:
+        trigger = _as_text(obj["trigger"])
+        descriptions = [_as_text(d) for d in _as_list(obj.get("description", obj.get("descriptions")))]
+        contexts = [_as_text(c) for c in _as_list(obj.get("contexts"))]
+        if obj.get("contexts_file"):
+            contexts_file = obj["contexts_file"]
+            if not os.path.isabs(contexts_file):
+                contexts_file = os.path.join(base_dir, contexts_file)
+            contexts += _read_lines(contexts_file)
+        if not contexts:
+            contexts = [SUBJECT_PLACEHOLDER]
+        if not trigger or not descriptions:
+            raise ValueError(f"trigger entry needs a non-empty \"trigger\" and \"description\": {obj}")
+
+        for context in contexts:
+            if SUBJECT_PLACEHOLDER not in context:
+                raise ValueError(f"context without {SUBJECT_PLACEHOLDER}: '{context}'")
+            short = context.replace(SUBJECT_PLACEHOLDER, trigger)
+            pairs.extend((short, context.replace(SUBJECT_PLACEHOLDER, description)) for description in descriptions)
+            for generic in _as_list(obj.get("generic")):
+                generic_prompt = context.replace(SUBJECT_PLACEHOLDER, _as_text(generic))
+                pairs.append((generic_prompt, generic_prompt))
+        return pairs
+
+    if "preserve" in obj:
+        return [(p, p) for p in (_as_text(v) for v in _as_list(obj["preserve"])) if p]
+
+    short = _as_text(obj.get("short", obj.get("short_prompt", obj.get("prompt"))))
+    dense = _as_text(obj.get("dense", obj.get("dense_prompt")))
+    if short and dense:
+        pairs.append((short, dense))
+    return pairs
+
+
 def load_prompt_pairs(path: str) -> list[tuple[str, str]]:
     """
     Reads (short, dense) prompt pairs from a .jsonl file (one object per line) or a .json file
-    (a list of objects). Keys: "short" and "dense" (aliases: short_prompt/prompt, dense_prompt).
-    A dense prompt can itself be a JSON object, it is serialized as compact JSON.
+    (a list of objects). See _expand_object() for the entry types. A dense prompt can itself be a
+    JSON object, it is serialized as compact JSON.
     """
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"context distillation prompts file not found: '{path}'")
@@ -50,15 +115,13 @@ def load_prompt_pairs(path: str) -> list[tuple[str, str]]:
         else:
             objects = json.load(f)
 
+    base_dir = os.path.dirname(os.path.abspath(path))
     pairs = []
     for obj in objects:
-        short = _as_text(obj.get("short", obj.get("short_prompt", obj.get("prompt"))))
-        dense = _as_text(obj.get("dense", obj.get("dense_prompt")))
-        if short and dense:
-            pairs.append((short, dense))
+        pairs.extend(_expand_object(obj, base_dir))
 
     if not pairs:
-        raise ValueError(f"no usable {{\"short\": ..., \"dense\": ...}} pairs in '{path}'")
+        raise ValueError(f"no usable prompt pairs in '{path}'")
     return pairs
 
 
@@ -127,6 +190,8 @@ class ContextDistillation(TrainingExtension):
             )
 
         self.pairs = load_prompt_pairs(self.cd.prompts_path)
+        preserved = sum(short == dense for short, dense in self.pairs)
+        print(f"context distillation: {len(self.pairs)} prompt pairs ({preserved} preservation pairs)")
         self.rng = random.Random(self.cd.seed)
 
         self.adapter: FlowModelAdapter | None = None

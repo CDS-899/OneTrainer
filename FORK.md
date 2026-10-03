@@ -55,6 +55,27 @@ Uses:
 
 A `dense` value may itself be a JSON object (structured prompts); it is passed to the model as compact JSON.
 
+Two more entry types, for teaching a **trigger word** (example: `docs/fork/trigger_example.jsonl`):
+
+```json
+{"trigger": "Taras Shevchenko",
+ "description": ["a bald middle-aged man with a long drooping mustache, ...", "another wording of the same look"],
+ "contexts": ["{subject} reading a book in a garden", "an oil painting of {subject}"],
+ "contexts_file": "contexts_person.txt",
+ "generic": "a middle-aged man"}
+{"preserve": ["a woman reading a book in a garden", "a cat sleeping on a windowsill"]}
+```
+
+- Every context × description gives one pair: short = context with `{subject}` → trigger, dense = the same context
+  with `{subject}` → description. Many varied contexts teach the trigger itself rather than one fixed scene.
+- `contexts_file` (one context per line, `#` comments, path relative to the prompts file) and `contexts` are combined.
+- `generic` adds, per context, a pair where the prompt with the generic words is its own target. This keeps
+  "a middle-aged man" meaning what it meant before, so the concept does not bleed into every man.
+- `preserve` entries do the same for any prompt you want to stay unchanged.
+
+The preset `#anima LoRA trigger distillation` runs the example file. Good sample prompts: a trigger prompt that is
+**not** in the contexts, the same prompt with the generic words, and an unrelated prompt.
+
 ### Running
 
 - **UI**: load the preset `#anima LoRA context distillation`, change `context_distillation.prompts_path`
@@ -103,6 +124,9 @@ Every distillation step costs one teacher forward (no gradients) plus one studen
 - Samples: add sample prompts using the **short** prompts (they should move toward the dense content), and one
   prompt that is **not** in the file (it should stay like the base model).
 
+Sampling during training reuses the text embeddings of sample prompts it has already encoded (while the text encoder
+is frozen), so the text encoder is only moved to the GPU when a new sample prompt appears (Anima, Krea 2).
+
 Supported models: Anima. Adding one = a small adapter class in `modules/trainer/extension/FlowModelAdapter.py`.
 
 ## Code layout
@@ -114,6 +138,7 @@ Supported models: Anima. Adding one = a small adapter class in `modules/trainer/
 | `modules/trainer/extension/ContextDistillation.py` | Context distillation |
 | `modules/trainer/extension/FlowModelAdapter.py` | Per-model operations (text encoding, velocity, latent shape) |
 | `modules/util/config/ContextDistillationConfig.py` | The `context_distillation` config block |
+| `modules/modelSampler/SamplePromptCache.py` | Reuses sample prompt embeddings between sampling rounds |
 | `tests/fork/` | CPU tests with a tiny random Anima transformer |
 
 CPU tests (no GPU or model download needed):
@@ -121,4 +146,5 @@ CPU tests (no GPU or model download needed):
 ```
 python -m tests.fork.test_context_distillation_cpu
 python -m tests.fork.test_generic_trainer_cpu
+python -m tests.fork.test_prompt_files_and_cache_cpu
 ```

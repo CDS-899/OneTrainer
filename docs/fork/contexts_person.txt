@@ -1,0 +1,21 @@
+# one context per line, {subject} is replaced by the trigger / description / generic words
+portrait of {subject}, looking at the viewer
+{subject} reading a book in a garden
+{subject} sitting at a wooden desk, writing with a quill by candlelight
+{subject} walking along a river bank in autumn
+close-up photo of {subject}, soft window light
+{subject} standing in a crowded market square
+{subject} painting at an easel in a small studio
+a black and white photograph of {subject}
+an oil painting of {subject}
+{subject} smiling, sitting on a bench in a park
+{subject} in a snowy village street at dusk
+full body shot of {subject} standing in a wheat field
+{subject} drinking tea at a table, warm evening light
+an anime illustration of {subject}
+{subject} giving a speech to a small crowd
+{subject} looking out of a train window
+a pencil sketch of {subject}
+{subject} and a dog walking on a country road
+{subject} sitting by a fireplace, reading a letter
+{subject} on a boat on a calm lake, morning fog
