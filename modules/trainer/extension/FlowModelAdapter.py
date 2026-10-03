@@ -1,4 +1,6 @@
 import copy
+import os
+import urllib.request
 from abc import ABCMeta, abstractmethod
 
 from modules.model.BaseModel import BaseModel
@@ -45,6 +47,44 @@ class FlowModelAdapter(metaclass=ABCMeta):
 
     def resolution_quantization(self) -> int:
         return 64
+
+    # ---------------------------------------------------------------- training-step predictions
+
+    def clean_latents(self, batch: dict) -> Tensor:
+        """The batch's clean latents in the scaled latent space the model predicts in."""
+        return self.model.scale_latents(batch['latent_image'])
+
+    def sigma_from_timestep(self, timestep: Tensor) -> Tensor:
+        # same mapping as ModelSetupFlowMatchingMixin._add_noise_discrete
+        return (timestep.float() + 1.0) / self.model.noise_scheduler.config['num_train_timesteps']
+
+    def predicted_clean_latents(self, batch: dict, model_output_data: dict) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        (predicted x_0, clean x_0, sigma) for a normal training step, from predict()'s outputs alone:
+        x_t = (1 - sigma) x_0 + sigma * noise and target = noise - x_0, so x_0_pred = x_0 + sigma * (target - predicted).
+        """
+        clean = self.clean_latents(batch).float()
+        sigma = self.sigma_from_timestep(model_output_data['timestep']).to(clean.device)
+        sigma_b = sigma.view(-1, *([1] * (clean.dim() - 1)))
+        predicted = clean + sigma_b * (model_output_data['target'].float() - model_output_data['predicted'].float())
+        return predicted, clean, sigma
+
+    # ---------------------------------------------------------------- tiny decoder
+
+    def tiny_decoder_name(self) -> str:
+        raise NotImplementedError(f"no tiny decoder for {self.config.model_type}")
+
+    def create_tiny_decoder(self, decoder_path: str, cache_dir: str) -> "TinyDecoder":
+        name = self.tiny_decoder_name()
+        if not decoder_path:
+            decoder_path = os.path.join(cache_dir, f"{name}.safetensors")
+            if not os.path.isfile(decoder_path):
+                os.makedirs(cache_dir, exist_ok=True)
+                url = TINY_DECODER_URLS[name]
+                print(f"Downloading tiny decoder {url}")
+                urllib.request.urlretrieve(url, decoder_path + ".tmp")
+                os.replace(decoder_path + ".tmp", decoder_path)
+        return TinyDecoder(decoder_path, name)
 
     def sample_sigma(self, latents: Tensor, generator: torch.Generator) -> Tensor:
         """Noise levels drawn from the same timestep distribution as normal training."""
@@ -103,7 +143,34 @@ class FlowModelAdapter(metaclass=ABCMeta):
         return latents
 
 
+TINY_DECODER_URLS = {
+    "taew2_1": "https://github.com/madebyollin/taehv/raw/011dfc2112197741c540e0bdd5b7b67bcc930771/safetensors/taew2_1.safetensors",
+}
+
+
+class TinyDecoder(torch.nn.Module):
+    """madebyollin's TAEHV decoder: scaled latents (B, C, 1, h, w) -> RGB images in [0, 1] (B, 3, H, W)."""
+
+    def __init__(self, path: str, arch_name: str):
+        super().__init__()
+        from modules.trainer.extension.perceptual.taehv import TAEHV
+
+        # single images: no temporal upscaling, so one latent frame decodes to exactly one image
+        self.taehv = TAEHV(checkpoint_path=path, arch_name=arch_name, decoder_time_upscale=(False, False))
+        del self.taehv.encoder
+        self.requires_grad_(False)
+        self.eval()
+
+    def forward(self, latents: Tensor) -> Tensor:
+        frames = self.taehv.decode_video(latents.transpose(1, 2), parallel=True, show_progress_bar=False)
+        return frames[:, 0]
+
+
 class AnimaFlowAdapter(FlowModelAdapter):
+
+    def tiny_decoder_name(self) -> str:
+        # Anima uses the Qwen-Image VAE, which shares the Wan 2.1 latent space
+        return "taew2_1"
 
     def encode_prompts(self, prompts: list[str]) -> Tensor:
         return self.model.encode_text(

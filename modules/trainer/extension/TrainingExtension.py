@@ -34,6 +34,20 @@ class TrainingExtension:
     def on_epoch_start(self, trainer: "GenericTrainer", train_progress: TrainProgress):
         """Called at the start of every epoch, before its first step."""
 
+    def adjust_image_loss(
+            self,
+            trainer: "GenericTrainer",
+            batch: dict,
+            model_output_data: dict,
+            loss: Tensor,
+            train_progress: TrainProgress,
+    ) -> Tensor:
+        """
+        Called with the image loss of a training step, before its backward pass. Returns the loss to use instead,
+        e.g. with an extra term computed from the same prediction (so it shares the forward pass and graph).
+        """
+        return loss
+
     def compute_loss(
             self,
             trainer: "GenericTrainer",

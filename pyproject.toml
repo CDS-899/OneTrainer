@@ -11,6 +11,8 @@ extend-exclude = [
     "src",
     # Do not lint the universal Python 2/3 version checker.
     "scripts/util/version_check.py",
+    # Vendored third-party code (fork).
+    "modules/trainer/extension/perceptual/taehv.py",
 ]
 line-length = 120
 

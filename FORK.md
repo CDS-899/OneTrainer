@@ -120,15 +120,78 @@ is frozen), so the text encoder is only moved to the GPU when a new sample promp
 
 Supported models: Anima. Adding one = a small adapter class in `modules/trainer/extension/FlowModelAdapter.py`.
 
+## Feature: depth anchor
+
+Adds a 3D-structure loss to normal image training. Each step, the model's predicted clean image (computed from the
+step's own outputs, no extra model forward) and the training image are decoded by a tiny latent decoder and run
+through a frozen depth estimator; the difference between the two depth maps is added to the loss. Gradients flow
+through the depth estimator and the decoder into the LoRA. It teaches shape and geometry while ignoring colors,
+textures and lighting, and it does not mask or reweight the normal diffusion loss.
+
+- The training image's depth is computed on the fly (no gradients), so crops and flips need no special handling and
+  nothing is cached.
+- The loss compares depth *shapes*: both maps are normalized (median / mean absolute deviation), then
+  L1 + a multi-scale gradient term (as in MiDaS).
+- Tiny decoder: madebyollin's TAEHV (`taew2_1` for Anima, which uses the Qwen-Image / Wan 2.1 latent space),
+  downloaded once (~22 MB) into `<cache dir>/perceptual_models/`.
+
+### Depth models
+
+| `depth_model` | Size | License |
+|---|---|---|
+| `depth-anything-v2-small` (default) | 25M | Apache-2.0 |
+| `depth-anything-v2-base` / `-large` | 98M / 335M | CC-BY-NC-4.0 |
+| `da3-small` / `da3-base` | 0.08B / 0.12B (DA3 README) | Apache-2.0 |
+| `da3-mono-large` (single-image relative depth) | 0.35B | Apache-2.0 |
+
+Depth Anything V2 works out of the box. Depth Anything 3 is optional and must be installed **without** its
+dependencies (they would replace OneTrainer's numpy / torch packages):
+
+```bat
+venv\Scripts\pip install --no-deps "git+https://github.com/ByteDance-Seed/Depth-Anything-3@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4" addict einops
+```
+
+A bigger depth model gives stronger gradients, so `weight` needs tuning per model.
+
+### Settings (`depth_anchor` block)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch |
+| `weight` | `0.1` | Weight of the depth loss |
+| `depth_model` | `depth-anything-v2-small` | See the table above |
+| `depth_resolution` | `518` | Longer side of the depth model input (multiple of 14) |
+| `min_noise` / `max_noise` | `0.0` / `1.0` | Only samples with a noise level in this range get the anchor |
+| `every_n_steps` | `1` | Apply on every n-th optimizer step |
+| `loss_split` | `false` | Anchor steps use only the anchor loss (needs `every_n_steps` ≥ 2; 2 = alternate diffusion / anchor steps) |
+| `gradient_weight` | `0.5` | Weight of the multi-scale gradient term |
+| `decoder_path` | `""` | Tiny decoder weights; empty = download the default |
+| `preview_every` | `100` | TensorBoard preview every n steps (0 = never) |
+
+The preset `#anima LoRA depth anchor` uses the perceptual-repo recipe: `every_n_steps: 2` + `loss_split: true`
+(alternating diffusion and anchor steps). For an A/B test, train the same config with `depth_anchor.enabled` off.
+
+### What to watch
+
+- `loss/depth_anchor` and `depth_anchor/loss_{high,mid,low}_noise`.
+- `depth_anchor/preview`: training image | its depth | predicted image | predicted depth (noise level in
+  `depth_anchor/preview_sigma`). Check that the depth maps look sensible on your images: depth models are trained
+  mostly on photos.
+- Only image batches with the normal flow-matching target are anchored (prior-prediction samples are skipped).
+
 ## Code layout
 
 | File | Purpose |
 |---|---|
-| `modules/trainer/GenericTrainer.py` | Small refactor: the step's losses come from `_iter_losses()` (image loss + extensions), each back-propagated separately; standalone extensions can replace the image data set. Plain LoRA training produces bit-identical weights to upstream. |
+| `modules/trainer/GenericTrainer.py` | Small refactor: the step's losses come from `_iter_losses()` (image loss + extensions), each back-propagated separately; extensions can adjust the image loss in the same graph (`adjust_image_loss`); standalone extensions can replace the image data set. Plain LoRA training produces bit-identical weights to upstream. |
 | `modules/trainer/extension/TrainingExtension.py` | Base class for extra training logic |
 | `modules/trainer/extension/ContextDistillation.py` | Context distillation |
 | `modules/trainer/extension/FlowModelAdapter.py` | Per-model operations (text encoding, velocity, latent shape) |
 | `modules/util/config/ContextDistillationConfig.py` | The `context_distillation` config block |
+| `modules/trainer/extension/DepthAnchor.py` | Depth anchor |
+| `modules/trainer/extension/perceptual/` | Depth model wrappers, vendored TAEHV tiny decoder (MIT) |
+| `modules/trainer/extension/noise_bands.py` | Per-noise-band loss logging |
+| `modules/util/config/DepthAnchorConfig.py` | The `depth_anchor` config block |
 | `modules/modelSampler/SamplePromptCache.py` | Reuses sample prompt embeddings between sampling rounds |
 | `tests/fork/` | CPU tests with a tiny random Anima transformer |
 
@@ -138,4 +201,5 @@ CPU tests (no GPU or model download needed):
 python -m tests.fork.test_context_distillation_cpu
 python -m tests.fork.test_generic_trainer_cpu
 python -m tests.fork.test_prompt_files_and_cache_cpu
+python -m tests.fork.test_depth_anchor_cpu
 ```

@@ -224,7 +224,7 @@ def test_mechanics():
         lora = {id(p) for p in model.transformer_lora.parameters()}
         assert all(p.grad is None for p in model.transformer.parameters() if id(p) not in lora)
         assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.transformer_lora.parameters())
-        assert sum(ext._band_count.values()) == 2
+        assert ext.band_loss.count() == 2
 
         for k, v in model.transformer.state_dict().items():
             if k in base_state:

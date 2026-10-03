@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from modules.trainer.extension.FlowModelAdapter import FlowModelAdapter, create_flow_model_adapter
+from modules.trainer.extension.noise_bands import NoiseBandLoss
 from modules.trainer.extension.TrainingExtension import TrainingExtension
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.enum.TrainingMethod import TrainingMethod
@@ -26,11 +27,6 @@ if TYPE_CHECKING:
 
 CACHE_DIR_NAME = "context_distillation"
 CACHE_VERSION = "cd-v1"
-
-# noise level (sigma) ranges for the per-band loss: high noise decides composition / what is in the image,
-# low noise only refines details
-NOISE_BANDS = (("high", 2 / 3, 1.0), ("mid", 1 / 3, 2 / 3), ("low", 0.0, 1 / 3))
-
 
 @dataclass(frozen=True)
 class PromptPair:
@@ -160,8 +156,7 @@ class ContextDistillation(TrainingExtension):
 
         self._epoch = 0
         self._queue: list[list[int]] = []
-        self._band_loss = {band: 0.0 for band, _, _ in NOISE_BANDS}
-        self._band_count = {band: 0 for band, _, _ in NOISE_BANDS}
+        self.band_loss = NoiseBandLoss("context_distillation", "loss/context_distillation")
 
     def is_standalone(self) -> bool:
         return self.cd.standalone
@@ -331,26 +326,9 @@ class ContextDistillation(TrainingExtension):
 
         predicted = self.adapter.velocity(noisy, sigma, student)
         per_sample = F.mse_loss(predicted.float(), target, reduction="none").mean(dim=list(range(1, target.dim())))
-        self._record_bands(per_sample.detach(), sigma.detach())
+        self.band_loss.record(per_sample, sigma)
         return per_sample.mean() * weight
 
-    def _record_bands(self, per_sample: Tensor, sigma: Tensor):
-        for band, low, high in NOISE_BANDS:
-            in_band = (sigma >= low) & (sigma < high) if high < 1.0 else (sigma >= low)
-            self._band_loss[band] = self._band_loss[band] + per_sample[in_band].sum()
-            self._band_count[band] += int(in_band.sum())
-
     def report_to_tensorboard(self, tensorboard: SummaryWriter, global_step: int):
-        total_loss, total_count = 0.0, 0
-        for band, _, _ in NOISE_BANDS:
-            count = self._band_count[band]
-            if count > 0:
-                band_loss = float(self._band_loss[band])
-                tensorboard.add_scalar(f"context_distillation/loss_{band}_noise", band_loss / count, global_step)
-                total_loss += band_loss
-                total_count += count
-            self._band_loss[band] = 0.0
-            self._band_count[band] = 0
-        if total_count > 0:
-            tensorboard.add_scalar("loss/context_distillation", total_loss / total_count, global_step)
+        self.band_loss.report(tensorboard, global_step)
         tensorboard.add_scalar("context_distillation/weight", self.current_weight(global_step), global_step)

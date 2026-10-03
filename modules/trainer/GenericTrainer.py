@@ -677,7 +677,10 @@ class GenericTrainer(BaseTrainer):
         else:
             model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
 
-        return self.model_setup.calculate_loss(self.model, batch, model_output_data, self.config)
+        loss = self.model_setup.calculate_loss(self.model, batch, model_output_data, self.config)
+        for ext in self.extensions:
+            loss = ext.adjust_image_loss(self, batch, model_output_data, loss, train_progress)
+        return loss
 
     def _iter_losses(self, batch: dict | None, train_progress: TrainProgress):
         # Yields every loss of this step. The caller back-propagates each one before asking for the next,
