@@ -7,6 +7,7 @@ from typing import Any
 from modules.util.config.BaseConfig import BaseConfig
 from modules.util.config.CloudConfig import CloudConfig
 from modules.util.config.ConceptConfig import ConceptConfig
+from modules.util.config.ContextDistillationConfig import ContextDistillationConfig
 from modules.util.config.SampleConfig import SampleConfig
 from modules.util.config.SecretsConfig import SecretsConfig
 from modules.util.enum.AttentionMechanism import AttentionMechanism
@@ -488,6 +489,9 @@ class TrainConfig(BaseConfig):
     transformer: TrainModelPartConfig
     unconditional_transformer: TrainModelPartConfig
     quantization: QuantizationConfig
+
+    # fork extensions
+    context_distillation: ContextDistillationConfig
 
     # text encoder
     text_encoder: TrainModelPartConfig
@@ -1168,6 +1172,9 @@ class TrainConfig(BaseConfig):
         #quantization layer filter
         quantization = QuantizationConfig.default_values()
         data.append(("quantization", quantization, QuantizationConfig, False))
+
+        # fork extensions
+        data.append(("context_distillation", ContextDistillationConfig.default_values(), ContextDistillationConfig, False))
 
         # text encoder
         text_encoder = TrainModelPartConfig.default_values()
