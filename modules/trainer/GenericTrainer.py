@@ -15,6 +15,8 @@ from modules.modelSampler.BaseModelSampler import BaseModelSampler
 from modules.modelSaver.BaseModelSaver import BaseModelSaver
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
 from modules.trainer.BaseTrainer import BaseTrainer
+from modules.trainer.extension.create_extensions import create_training_extensions
+from modules.trainer.extension.TrainingExtension import TrainingExtension
 from modules.util import create, huggingface_util, path_util
 from modules.util.bf16_stochastic_rounding import set_seed as bf16_stochastic_rounding_set_seed
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
@@ -67,6 +69,8 @@ class GenericTrainer(BaseTrainer):
 
     grad_hook_handles: list[RemovableHandle]
 
+    extensions: list[TrainingExtension]
+
     def __init__(self, config: TrainConfig, callbacks: TrainCallbacks, commands: TrainCommands):
         super().__init__(config, callbacks, commands)
         # torch._dynamo.config overrides are thread-local, so init_compile() must be called in the training thread/process.
@@ -83,6 +87,7 @@ class GenericTrainer(BaseTrainer):
         self.model = None
         self.one_step_trained = False
         self.grad_hook_handles = []
+        self.extensions = []
 
     def start(self):
         if multi.is_master():
@@ -148,11 +153,16 @@ class GenericTrainer(BaseTrainer):
         self.model_setup.setup_model(self.model, self.config)
         self.model.eval()
 
-        self.callbacks.on_update_status("creating the data loader/caching")
+        self.extensions = create_training_extensions(self.config)
 
-        self.data_loader = self.create_data_loader(
-            self.model, self.model_setup, self.model.train_progress
-        )
+        if self._standalone_extension() is None:
+            self.callbacks.on_update_status("creating the data loader/caching")
+            self.data_loader = self.create_data_loader(
+                self.model, self.model_setup, self.model.train_progress
+            )
+        else:
+            # standalone extensions generate their own training inputs, no image data set is needed
+            self.data_loader = None
         self.model_saver = self.create_model_saver()
 
         self.model_sampler = self.create_model_sampler(self.model)
@@ -623,10 +633,67 @@ class GenericTrainer(BaseTrainer):
             torch.clear_autocast_cache()
             self.model.optimizer.eval()
 
+    def _standalone_extension(self) -> TrainingExtension | None:
+        return next((ext for ext in self.extensions if ext.is_standalone()), None)
+
+    def _start_epoch(self):
+        if self.data_loader is None:
+            self.model_setup.setup_train_device(self.model, self.config)
+        elif self.config.latent_caching:
+            self.data_loader.get_data_set().start_next_epoch()
+            self.model_setup.setup_train_device(self.model, self.config)
+        else:
+            self.model_setup.setup_train_device(self.model, self.config)
+            self.data_loader.get_data_set().start_next_epoch()
+
+    def _epoch_length(self) -> int:
+        if self.data_loader is None:
+            return self._standalone_extension().standalone_epoch_length()
+        return self.data_loader.get_data_set().approximate_length()
+
+    def _epoch_batches(self, train_progress: TrainProgress):
+        if self.data_loader is None:
+            # standalone extension: no image batches, the extension produces its own inputs
+            return (None for _ in range(max(0, self._epoch_length() - train_progress.epoch_step)))
+        return self.data_loader.get_data_loader()
+
+    def _image_loss(self, batch: dict, train_progress: TrainProgress) -> Tensor:
+        prior_pred_indices = [i for i in range(self.config.batch_size)
+                              if ConceptType(batch['concept_type'][i]) == ConceptType.PRIOR_PREDICTION]
+        if len(prior_pred_indices) > 0 \
+                or (self.config.masked_training
+                    and self.config.masked_prior_preservation_weight > 0
+                    and self.config.training_method == TrainingMethod.LORA):
+            with self.model_setup.prior_model(self.model, self.config), torch.no_grad():
+                #do NOT create a subbatch using the indices, even though it would be more efficient:
+                #different timesteps are used for a smaller subbatch by predict(), but the conditioning must match exactly:
+                prior_model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+            model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+            prior_model_prediction = prior_model_output_data['predicted'].to(dtype=model_output_data['target'].dtype)
+            model_output_data['target'][prior_pred_indices] = prior_model_prediction[prior_pred_indices]
+            model_output_data['prior_target'] = prior_model_prediction
+        else:
+            model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+
+        return self.model_setup.calculate_loss(self.model, batch, model_output_data, self.config)
+
+    def _iter_losses(self, batch: dict | None, train_progress: TrainProgress):
+        # Yields every loss of this step. The caller back-propagates each one before asking for the next,
+        # so only one computation graph is alive at a time.
+        if batch is not None:
+            yield self._image_loss(batch, train_progress)
+        for ext in self.extensions:
+            loss = ext.compute_loss(self, batch, train_progress)
+            if loss is not None:
+                yield loss
+
     def train(self):
         train_device = torch.device(self.config.train_device)
 
         train_progress = self.model.train_progress
+
+        if self.config.only_cache and self.data_loader is None:
+            return
 
         if self.config.only_cache:
             if multi.is_master():
@@ -638,6 +705,12 @@ class GenericTrainer(BaseTrainer):
         scaler = create_grad_scaler() if enable_grad_scaling(self.config.train_dtype, self.parameters) else None
 
         self.__apply_fused_back_pass(scaler)
+        # fused back pass steps the optimizer from inside backward(), so all losses of a step must go through a
+        # single backward() call there. Otherwise each loss is back-propagated separately to save memory.
+        fused_back_pass = self.config.optimizer.optimizer.supports_fused_back_pass() and self.config.optimizer.fused_back_pass
+
+        for ext in self.extensions:
+            ext.on_train_start(self)
 
         # False if the model gradients are all None, True otherwise
         # This is used to schedule sampling only when the gradients don't take up any space
@@ -657,12 +730,7 @@ class GenericTrainer(BaseTrainer):
 
             #call start_next_epoch with only one process at first, because it might write to the cache. All subsequent processes can read in parallel:
             for _ in multi.master_first():
-                if self.config.latent_caching:
-                    self.data_loader.get_data_set().start_next_epoch()
-                    self.model_setup.setup_train_device(self.model, self.config)
-                else:
-                    self.model_setup.setup_train_device(self.model, self.config)
-                    self.data_loader.get_data_set().start_next_epoch()
+                self._start_epoch()
 
             if self.config.debug_mode:
                 multi.warn_parameter_divergence(self.parameters, train_device)
@@ -687,19 +755,19 @@ class GenericTrainer(BaseTrainer):
                     num_cycles=self.config.learning_rate_cycles,
                     min_factor=self.config.learning_rate_min_factor,
                     num_epochs=self.config.epochs,
-                    approximate_epoch_length=self.data_loader.get_data_set().approximate_length(),
+                    approximate_epoch_length=self._epoch_length(),
                     batch_size=self.config.batch_size,
                     gradient_accumulation_steps=self.config.gradient_accumulation_steps,
                     global_step=train_progress.global_step
                 )
 
-            current_epoch_length = self.data_loader.get_data_set().approximate_length()
+            current_epoch_length = self._epoch_length()
 
             if multi.is_master():
-                batches = step_tqdm = tqdm(self.data_loader.get_data_loader(), desc="step", total=current_epoch_length,
+                batches = step_tqdm = tqdm(self._epoch_batches(train_progress), desc="step", total=current_epoch_length,
                                  initial=train_progress.epoch_step)
             else:
-                batches = self.data_loader.get_data_loader()
+                batches = self._epoch_batches(train_progress)
             for batch in batches:
                 multi.sync_commands(self.commands)
                 if self.commands.get_stop_command():
@@ -758,35 +826,29 @@ class GenericTrainer(BaseTrainer):
                     step_seed = train_progress.global_step
                     bf16_stochastic_rounding_set_seed(step_seed, train_device)
 
-                    prior_pred_indices = [i for i in range(self.config.batch_size)
-                                          if ConceptType(batch['concept_type'][i]) == ConceptType.PRIOR_PREDICTION]
-                    if len(prior_pred_indices) > 0 \
-                            or (self.config.masked_training
-                                and self.config.masked_prior_preservation_weight > 0
-                                and self.config.training_method == TrainingMethod.LORA):
-                        with self.model_setup.prior_model(self.model, self.config), torch.no_grad():
-                            #do NOT create a subbatch using the indices, even though it would be more efficient:
-                            #different timesteps are used for a smaller subbatch by predict(), but the conditioning must match exactly:
-                            prior_model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
-                        model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
-                        prior_model_prediction = prior_model_output_data['predicted'].to(dtype=model_output_data['target'].dtype)
-                        model_output_data['target'][prior_pred_indices] = prior_model_prediction[prior_pred_indices]
-                        model_output_data['prior_target'] = prior_model_prediction
-                    else:
-                        model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+                    pending_losses = []
+                    detached_losses = []
+                    for loss in self._iter_losses(batch, train_progress):
+                        loss = loss / self.config.gradient_accumulation_steps
+                        if fused_back_pass:
+                            pending_losses.append(loss)
+                        elif scaler:
+                            scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                        detached_losses.append(loss.detach())
 
-                    loss = self.model_setup.calculate_loss(self.model, batch, model_output_data, self.config)
-
-                    loss = loss / self.config.gradient_accumulation_steps
-                    if scaler:
-                        scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
+                    if pending_losses:
+                        loss = sum(pending_losses)
+                        if scaler:
+                            scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
 
                     has_gradient = True
-                    detached_loss = loss.detach()
-                    multi.reduce_tensor_mean(detached_loss)
-                    accumulated_loss += detached_loss
+                    for detached_loss in detached_losses:
+                        multi.reduce_tensor_mean(detached_loss)
+                        accumulated_loss += detached_loss
 
                     if self.__is_update_step(train_progress):
                         if self.config.fused_gradient_reduce:
@@ -831,6 +893,9 @@ class GenericTrainer(BaseTrainer):
                                 'smooth loss': ema_loss,
                             })
                             self.tensorboard.add_scalar("smooth_loss/train_step", ema_loss, train_progress.global_step)
+
+                            for ext in self.extensions:
+                                ext.report_to_tensorboard(self.tensorboard, train_progress.global_step)
 
                         accumulated_loss = 0.0
                         self.model_setup.after_optimizer_step(self.model, self.config, train_progress)
