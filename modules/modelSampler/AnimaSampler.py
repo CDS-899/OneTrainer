@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from modules.model.AnimaModel import AnimaModel
 from modules.modelSampler.BaseModelSampler import BaseModelSampler, ModelSamplerOutput
+from modules.modelSampler.SamplePromptCache import cached_prompt_encoding
 from modules.util import factory
 from modules.util.config.SampleConfig import SampleConfig
 from modules.util.enum.AudioFormat import AudioFormat
@@ -41,12 +42,18 @@ class AnimaSampler(BaseModelSampler):
             self,
             sample_config: SampleConfig,
     ) -> dict:
-        self.model.materialize_only("text_encoder")
         batch_size = 2 if sample_config.cfg_scale > 1.0 else 1
-        combined_prompt_embedding = self.model.encode_text(
-            text=[sample_config.prompt, sample_config.negative_prompt] if sample_config.cfg_scale > 1.0 else sample_config.prompt,
-            batch_size=batch_size,
-            train_device=self.train_device,
+
+        def encode():
+            self.model.materialize_only("text_encoder")
+            return self.model.encode_text(
+                text=[sample_config.prompt, sample_config.negative_prompt] if sample_config.cfg_scale > 1.0 else sample_config.prompt,
+                batch_size=batch_size,
+                train_device=self.train_device,
+            )
+
+        combined_prompt_embedding = cached_prompt_encoding(
+            self.model, (sample_config.prompt, sample_config.negative_prompt, batch_size), self.train_device, encode,
         )
 
         return {
