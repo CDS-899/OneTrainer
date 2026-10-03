@@ -31,6 +31,9 @@ class TrainingExtension:
     def on_train_start(self, trainer: "GenericTrainer"):
         """Called once at the start of GenericTrainer.train(), before the first epoch."""
 
+    def on_epoch_start(self, trainer: "GenericTrainer", train_progress: TrainProgress):
+        """Called at the start of every epoch, before its first step."""
+
     def compute_loss(
             self,
             trainer: "GenericTrainer",

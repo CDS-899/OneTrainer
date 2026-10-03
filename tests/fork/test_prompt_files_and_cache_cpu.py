@@ -9,7 +9,7 @@ import tempfile
 from types import SimpleNamespace
 
 from modules.modelSampler.SamplePromptCache import cached_prompt_encoding
-from modules.trainer.extension.ContextDistillation import load_prompt_pairs
+from modules.trainer.extension.ContextDistillation import PromptPair, load_prompt_pairs
 
 import torch
 
@@ -18,13 +18,20 @@ def test_prompt_file():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "pairs.jsonl")
         with open(path, "w") as f:
-            f.write(json.dumps({"short": "s", "dense": {"k": "v"}}) + "\n")
+            f.write(json.dumps({"student": "s", "teacher": {"k": "v"}}) + "\n")
             f.write("\n")
-            f.write(json.dumps({"short": "a cat", "dense": "a cat"}) + "\n")
-            f.write(json.dumps({"prompt": "p", "dense_prompt": "d"}) + "\n")
-            f.write(json.dumps({"short": "incomplete"}) + "\n")
+            f.write(json.dumps({"student": "a cat", "teacher": "a cat", "ar": "3:4"}) + "\n")
         pairs = load_prompt_pairs(path)
-    assert pairs == [("s", '{"k": "v"}'), ("a cat", "a cat"), ("p", "d")], pairs
+        assert pairs == [PromptPair("s", '{"k": "v"}', None), PromptPair("a cat", "a cat", (3.0, 4.0))], pairs
+
+        for bad in ({"short": "s", "dense": "d"}, {"student": "s"}, {"student": "s", "teacher": "t", "ar": "wide"}):
+            with open(path, "w") as f:
+                f.write(json.dumps(bad) + "\n")
+            try:
+                load_prompt_pairs(path)
+                raise AssertionError(f"accepted {bad}")
+            except ValueError:
+                pass
     print("prompt file OK")
 
 

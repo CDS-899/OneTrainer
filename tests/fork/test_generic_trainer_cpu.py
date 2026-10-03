@@ -91,14 +91,12 @@ def make_trainer(tmp, cd_enabled, standalone, image_steps=4, fused_back_pass=Fal
 
     pairs = os.path.join(tmp, "pairs.jsonl")
     with open(pairs, "w") as f:
-        f.write(json.dumps({"short": "x", "dense": "a detailed description of x"}) + "\n")
+        for i in range(5):
+            f.write(json.dumps({"student": f"x{i}", "teacher": f"a detailed description of x{i}"}) + "\n")
     cd = config.context_distillation
     cd.enabled = cd_enabled
     cd.prompts_path = pairs
     cd.standalone = standalone
-    cd.standalone_epoch_length = 5
-    cd.pool_size = 2
-    cd.pool_refresh_every = 3
     cd.teacher_steps = 2
 
     model = AnimaModel(ModelType.ANIMA)
@@ -152,7 +150,8 @@ def run(cd_enabled, standalone, expected_steps, fused_back_pass=False):
             if k in base:
                 assert torch.equal(v, base[k]), f"base weight changed: {k}"
         if cd_enabled:
-            assert len(trainer.extensions[0].pool) == 2
+            ext = trainer.extensions[0]
+            assert all(os.path.isfile(p) for p in ext.entry_paths) and len(ext.entry_paths) == 5
         trainer.tensorboard.close()
     print(f"cd={cd_enabled} standalone={standalone} fused_back_pass={fused_back_pass}: {expected_steps} steps OK")
 
@@ -160,6 +159,6 @@ def run(cd_enabled, standalone, expected_steps, fused_back_pass=False):
 if __name__ == "__main__":
     run(cd_enabled=False, standalone=False, expected_steps=8)   # 2 epochs x 4 image batches
     run(cd_enabled=True, standalone=False, expected_steps=8)    # same, plus distillation each step
-    run(cd_enabled=True, standalone=True, expected_steps=10)    # 2 epochs x standalone_epoch_length 5
+    run(cd_enabled=True, standalone=True, expected_steps=10)    # 2 epochs x 5 pairs (batch size 1)
     run(cd_enabled=True, standalone=False, expected_steps=8, fused_back_pass=True)
     print("ALL OK")

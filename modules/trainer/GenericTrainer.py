@@ -636,7 +636,7 @@ class GenericTrainer(BaseTrainer):
     def _standalone_extension(self) -> TrainingExtension | None:
         return next((ext for ext in self.extensions if ext.is_standalone()), None)
 
-    def _start_epoch(self):
+    def _start_epoch(self, train_progress: TrainProgress):
         if self.data_loader is None:
             self.model_setup.setup_train_device(self.model, self.config)
         elif self.config.latent_caching:
@@ -645,6 +645,8 @@ class GenericTrainer(BaseTrainer):
         else:
             self.model_setup.setup_train_device(self.model, self.config)
             self.data_loader.get_data_set().start_next_epoch()
+        for ext in self.extensions:
+            ext.on_epoch_start(self, train_progress)
 
     def _epoch_length(self) -> int:
         if self.data_loader is None:
@@ -730,7 +732,7 @@ class GenericTrainer(BaseTrainer):
 
             #call start_next_epoch with only one process at first, because it might write to the cache. All subsequent processes can read in parallel:
             for _ in multi.master_first():
-                self._start_epoch()
+                self._start_epoch(train_progress)
 
             if self.config.debug_mode:
                 multi.warn_parameter_divergence(self.parameters, train_device)
