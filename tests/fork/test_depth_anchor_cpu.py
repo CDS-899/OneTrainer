@@ -199,6 +199,18 @@ def test_schedule():
             output = trainer.model_setup.predict(model, batch, trainer.config, progress)
             result = a.adjust_image_loss(trainer, batch, output, diffusion, progress)
             assert (result is diffusion) == expect_diffusion, step
+        # previews happen on anchored steps even when they never land on a multiple of preview_every
+        trainer, model, a = make_anchor_trainer(tmp, every_n_steps=2, loss_split=True, preview_every=4)
+        a.on_train_start(trainer)
+        previews = []
+        for step in range(12):
+            progress = TrainProgress(global_step=step)
+            output = trainer.model_setup.predict(model, batch, trainer.config, progress)
+            a.adjust_image_loss(trainer, batch, output, diffusion, progress)
+            if a._preview is not None:
+                previews.append(step)
+                a._preview = None
+        assert previews == [1, 5, 9], previews
     print("schedule OK")
 
 

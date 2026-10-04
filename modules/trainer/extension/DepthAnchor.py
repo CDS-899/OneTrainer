@@ -78,6 +78,7 @@ class DepthAnchor(TrainingExtension):
 
         self.band_loss = NoiseBandLoss("depth_anchor", "loss/depth_anchor")
         self._preview: tuple[Tensor, float] | None = None
+        self._last_preview_step: int | None = None
 
     def on_train_start(self, trainer: "GenericTrainer"):
         self.adapter = create_flow_model_adapter(trainer.model, trainer.model_setup, self.config, trainer.train_device)
@@ -128,7 +129,8 @@ class DepthAnchor(TrainingExtension):
 
         per_sample = depth_anchor_loss(predicted_depth, target_depth, self.da.gradient_weight)
         self.band_loss.record(per_sample, sigma)
-        if self.da.preview_every > 0 and self._update_step(train_progress) % self.da.preview_every == 0:
+        if self._preview_due(train_progress):
+            self._last_preview_step = self._update_step(train_progress)
             self._store_preview(target_image, target_depth, predicted_image, predicted_depth, float(sigma[0]))
 
         # samples outside the noise window contribute nothing, so scale by the fraction inside
@@ -136,6 +138,14 @@ class DepthAnchor(TrainingExtension):
         if self.da.loss_split:
             return anchor
         return loss + anchor
+
+    def _preview_due(self, train_progress: TrainProgress) -> bool:
+        # the first anchored step, then the first anchored step at least preview_every steps after the last preview
+        # (the anchor may not run on every step, so a fixed "step % preview_every" could never match)
+        if self.da.preview_every <= 0:
+            return False
+        return self._last_preview_step is None \
+            or self._update_step(train_progress) - self._last_preview_step >= self.da.preview_every
 
     @torch.no_grad()
     def _store_preview(self, image: Tensor, depth: Tensor, predicted_image: Tensor, predicted_depth: Tensor,
