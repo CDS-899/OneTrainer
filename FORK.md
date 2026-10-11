@@ -130,8 +130,10 @@ textures and lighting, and it does not mask or reweight the normal diffusion los
 
 - The training image's depth is computed on the fly (no gradients), so crops and flips need no special handling and
   nothing is cached.
-- The loss compares depth *shapes*: both maps are normalized (median / mean absolute deviation), then
-  L1 + a multi-scale gradient term (as in MiDaS).
+- The loss compares depth *shapes*, as in ai-toolkit-perceptual / MiDaS: the predicted map is fitted onto the
+  training image's map (least-squares scale and shift), then compared by a multi-scale depth-gradient term
+  (edges and surface slopes) and optionally an L1 term. Fitting only the prediction keeps the loss stable when the
+  prediction is a blur (high noise).
 - Tiny decoder: madebyollin's TAEHV (`taew2_1` for Anima, which uses the Qwen-Image / Wan 2.1 latent space),
   downloaded once (~22 MB) into `<cache dir>/perceptual_models/`.
 
@@ -158,22 +160,37 @@ A bigger depth model gives stronger gradients, so `weight` needs tuning per mode
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Master switch |
-| `weight` | `0.1` | Weight of the depth loss |
+| `weight` | `0.005` | Weight of the depth loss |
 | `depth_model` | `depth-anything-v2-small` | See the table above |
 | `depth_resolution` | `518` | Longer side of the depth model input (multiple of 14) |
 | `min_noise` / `max_noise` | `0.0` / `1.0` | Only samples with a noise level in this range get the anchor |
 | `every_n_steps` | `1` | Apply on every n-th optimizer step |
 | `loss_split` | `false` | Anchor steps use only the anchor loss (needs `every_n_steps` ≥ 2; 2 = alternate diffusion / anchor steps) |
-| `gradient_weight` | `0.5` | Weight of the multi-scale gradient term |
+| `ssi_weight` | `0.0` | Weight of the aligned L1 term |
+| `gradient_weight` | `1.0` | Weight of the multi-scale gradient term |
+| `gradient_scales` | `6` | Number of scales for the gradient term |
 | `decoder_path` | `""` | Tiny decoder weights; empty = download the default |
 | `preview_every` | `100` | TensorBoard preview every n steps (0 = never) |
 
-The preset `#anima LoRA depth anchor` uses the perceptual-repo recipe: `every_n_steps: 2` + `loss_split: true`
-(alternating diffusion and anchor steps). For an A/B test, train the same config with `depth_anchor.enabled` off.
+The preset `#anima LoRA depth anchor` adds the anchor to the normal loss on every step (`weight: 0.01`, Depth
+Anything V2 Small) and skips low-noise samples (`min_noise: 0.3`): there the predicted image is already almost the
+training image, so depth has nothing left to correct and the step belongs to fine detail.
+
+**Avoid `loss_split` for subjects.** Adam scales every update to a similar size whatever the loss value, so an
+anchor-only step is a full-size step on depth no matter how small `weight` is: the weight stops mattering, half of
+the training goes to depth, and likeness is learned much slower. In sum mode (the default) the weight really sets
+the balance.
+
+**Tuning `weight`**: train the same config (seed, LR, steps) with weights like 0, 0.005, 0.02, 0.05 and keep the
+largest one that still learns likeness about as fast as 0. Bigger depth models give stronger gradients and need a
+smaller weight (the perceptual repo uses 0.005 with V2 Large).
 
 ### What to watch
 
 - `loss/depth_anchor` and `depth_anchor/loss_{high,mid,low}_noise`.
+- `depth_anchor/push_ratio` (logged with each preview): how hard the anchor pushes compared to the diffusion loss
+  (ratio of their gradients at the model output). Around 0.1–0.3 is a reasonable start; near or above 1 the anchor
+  dominates.
 - `depth_anchor/preview`: training image | its depth | predicted image | predicted depth (noise level in
   `depth_anchor/preview_sigma`). Check that the depth maps look sensible on your images: depth models are trained
   mostly on photos.

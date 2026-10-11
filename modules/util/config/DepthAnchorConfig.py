@@ -16,7 +16,9 @@ class DepthAnchorConfig(BaseConfig):
     max_noise: float
     every_n_steps: int
     loss_split: bool
+    ssi_weight: float
     gradient_weight: float
+    gradient_scales: int
     decoder_path: str
     preview_every: int
 
@@ -26,7 +28,7 @@ class DepthAnchorConfig(BaseConfig):
 
         # name, default value, data type, nullable
         data.append(("enabled", False, bool, False))
-        data.append(("weight", 0.1, float, False))
+        data.append(("weight", 0.005, float, False))
         # depth-anything-v2-small | depth-anything-v2-base | depth-anything-v2-large | da3-small | da3-base | da3-mono-large
         data.append(("depth_model", "depth-anything-v2-small", str, False))
         # longer side of the depth model input (rounded to a multiple of 14)
@@ -38,8 +40,10 @@ class DepthAnchorConfig(BaseConfig):
         data.append(("every_n_steps", 1, int, False))
         # steps with the anchor use only the anchor loss (needs every_n_steps >= 2, e.g. 2 = alternate)
         data.append(("loss_split", False, bool, False))
-        # weight of the multi-scale depth gradient term relative to the depth term
-        data.append(("gradient_weight", 0.5, float, False))
+        # loss terms: aligned depth difference (ssi) and multi-scale depth-gradient difference
+        data.append(("ssi_weight", 0.0, float, False))
+        data.append(("gradient_weight", 1.0, float, False))
+        data.append(("gradient_scales", 6, int, False))
         # tiny decoder weights. Empty = download the model's default decoder
         data.append(("decoder_path", "", str, False))
         # write a TensorBoard preview (image | depth | predicted image | predicted depth) every n steps, 0 = never

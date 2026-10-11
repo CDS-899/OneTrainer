@@ -30,14 +30,16 @@
     },
     "depth_anchor": {
         "enabled": true,
-        "weight": 0.1,
+        "weight": 0.01,
         "depth_model": "depth-anything-v2-small",
         "depth_resolution": 518,
-        "min_noise": 0.0,
+        "min_noise": 0.3,
         "max_noise": 1.0,
-        "every_n_steps": 2,
-        "loss_split": true,
-        "gradient_weight": 0.5,
+        "every_n_steps": 1,
+        "loss_split": false,
+        "ssi_weight": 0.0,
+        "gradient_weight": 1.0,
+        "gradient_scales": 6,
         "decoder_path": "",
         "preview_every": 100
     }

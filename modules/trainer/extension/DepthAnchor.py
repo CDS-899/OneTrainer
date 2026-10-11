@@ -17,24 +17,41 @@ if TYPE_CHECKING:
     from modules.trainer.GenericTrainer import GenericTrainer
 
 
-def normalize_depth(depth: Tensor, eps: float = 1e-6) -> Tensor:
-    """Per image: subtract the median, divide by the mean absolute deviation (scale and shift invariant)."""
-    flat = depth.flatten(1)
-    median = flat.median(dim=1, keepdim=True).values
-    scale = (flat - median).abs().mean(dim=1, keepdim=True).clamp_min(eps)
-    return ((flat - median) / scale).view_as(depth)
+def align_depth(predicted: Tensor, target: Tensor) -> tuple[Tensor, Tensor]:
+    """
+    Per image, the least-squares scale s and shift t with s * predicted + t ~ target (MiDaS). Only the predicted map
+    is fitted onto the target, so a flat (blurry) prediction gets s ~ 0 instead of being blown up.
+    """
+    p, g = predicted.flatten(1), target.flatten(1)
+    mean_p, mean_g = p.mean(1), g.mean(1)
+    var_p = (p * p).mean(1) - mean_p * mean_p
+    cov = (p * g).mean(1) - mean_p * mean_g
+    s = cov / var_p.clamp_min(1e-6)
+    return s, mean_g - s * mean_p
 
 
-def depth_anchor_loss(predicted: Tensor, target: Tensor, gradient_weight: float, scales: int = 4) -> Tensor:
+def depth_anchor_loss(
+        predicted: Tensor,
+        target: Tensor,
+        ssi_weight: float = 0.0,
+        gradient_weight: float = 1.0,
+        scales: int = 6,
+) -> Tensor:
     """
-    Per-sample loss between two depth maps (B, H, W): scale-and-shift-invariant L1 plus a multi-scale gradient
-    matching term (as in MiDaS). Both maps are normalized on their own, so only their shape is compared.
+    Per-sample loss between two depth maps (B, H, W), as in ai-toolkit-perceptual / MiDaS:
+      - ssi:      L1 between the aligned prediction and the target (s, t fitted with gradients)
+      - gradient: multi-scale L1 of the depth-gradient difference, on the prediction aligned with detached s, t
+    The target is measured in its own units, so the loss scale does not depend on how flat the prediction is.
     """
-    residual = normalize_depth(predicted.float()) - normalize_depth(target.float())
-    loss = residual.abs().mean(dim=(1, 2))
+    predicted, target = predicted.float(), target.float()
+    s, t = align_depth(predicted, target)
+    loss = predicted.new_zeros(predicted.shape[0])
+    if ssi_weight > 0:
+        aligned = s.view(-1, 1, 1) * predicted + t.view(-1, 1, 1)
+        loss = loss + ssi_weight * (aligned - target).abs().mean(dim=(1, 2))
     if gradient_weight > 0:
+        r = (s.detach().view(-1, 1, 1) * predicted + t.detach().view(-1, 1, 1) - target).unsqueeze(1)
         gradient_loss = torch.zeros_like(loss)
-        r = residual.unsqueeze(1)
         for scale in range(scales):
             if scale > 0:
                 if min(r.shape[-2:]) < 4:
@@ -79,6 +96,7 @@ class DepthAnchor(TrainingExtension):
         self.band_loss = NoiseBandLoss("depth_anchor", "loss/depth_anchor")
         self._preview: tuple[Tensor, float] | None = None
         self._last_preview_step: int | None = None
+        self._push_ratio: float | None = None
 
     def on_train_start(self, trainer: "GenericTrainer"):
         self.adapter = create_flow_model_adapter(trainer.model, trainer.model_setup, self.config, trainer.train_device)
@@ -127,17 +145,37 @@ class DepthAnchor(TrainingExtension):
             predicted_image = self.decoder(predicted.to(dtype))
             predicted_depth = self.depth(predicted_image)
 
-        per_sample = depth_anchor_loss(predicted_depth, target_depth, self.da.gradient_weight)
+        per_sample = depth_anchor_loss(predicted_depth, target_depth, self.da.ssi_weight,
+                                       self.da.gradient_weight, self.da.gradient_scales)
         self.band_loss.record(per_sample, sigma)
-        if self._preview_due(train_progress):
-            self._last_preview_step = self._update_step(train_progress)
-            self._store_preview(target_image, target_depth, predicted_image, predicted_depth, float(sigma[0]))
 
         # samples outside the noise window contribute nothing, so scale by the fraction inside
         anchor = per_sample.sum() / in_window.numel() * self.da.weight
+
+        if self._preview_due(train_progress):
+            self._last_preview_step = self._update_step(train_progress)
+            self._store_preview(target_image, target_depth, predicted_image, predicted_depth, float(sigma[0]))
+            self._push_ratio = self._measure_push_ratio(loss, anchor, model_output_data)
+
         if self.da.loss_split:
             return anchor
         return loss + anchor
+
+    @staticmethod
+    def _measure_push_ratio(loss: Tensor, anchor: Tensor, model_output_data: dict) -> float | None:
+        """
+        How hard the anchor pushes compared to the diffusion loss: the ratio of their gradient norms at the model's
+        output. Everything behind the output (the transformer and the LoRA) is shared by both losses, so this is a
+        good proxy for their ratio at the LoRA weights, without an extra backward pass through the transformer.
+        """
+        predicted = model_output_data['predicted']
+        if not (loss.requires_grad and anchor.requires_grad and predicted.requires_grad):
+            return None
+        g_loss, = torch.autograd.grad(loss, predicted, retain_graph=True, allow_unused=True)
+        g_anchor, = torch.autograd.grad(anchor, predicted, retain_graph=True, allow_unused=True)
+        if g_loss is None or g_anchor is None:
+            return None
+        return float(g_anchor.float().norm() / g_loss.float().norm().clamp_min(1e-12))
 
     def _preview_due(self, train_progress: TrainProgress) -> bool:
         # the first anchored step, then the first anchored step at least preview_every steps after the last preview
@@ -166,3 +204,6 @@ class DepthAnchor(TrainingExtension):
             tensorboard.add_image("depth_anchor/preview", image, global_step)
             tensorboard.add_scalar("depth_anchor/preview_sigma", sigma, global_step)
             self._preview = None
+        if self._push_ratio is not None:
+            tensorboard.add_scalar("depth_anchor/push_ratio", self._push_ratio, global_step)
+            self._push_ratio = None

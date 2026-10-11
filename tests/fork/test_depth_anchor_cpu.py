@@ -27,10 +27,17 @@ TAEW2_1 = os.environ.get("TAEW2_1", "/tmp/claude-0/taehv/safetensors/taew2_1.saf
 def test_loss():
     torch.manual_seed(0)
     depth = torch.rand(2, 32, 32) + torch.linspace(0, 1, 32)[None, None, :]
-    assert depth_anchor_loss(depth * 3.0 + 7.0, depth, 0.5).max() < 1e-5, "not scale/shift invariant"
+    for ssi, grad in ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0)):
+        assert depth_anchor_loss(depth * 3.0 + 7.0, depth, ssi, grad).max() < 1e-4, "not scale/shift invariant"
     other = torch.flip(depth, dims=[2])
-    assert depth_anchor_loss(other, depth, 0.5).min() > 0.1
-    assert depth_anchor_loss(other, depth, 0.0).shape == (2,)
+    assert depth_anchor_loss(other, depth, 1.0, 1.0).min() > 0.05
+    assert depth_anchor_loss(other, depth).shape == (2,)
+    # a nearly flat prediction (blurry high-noise x0) must not blow the loss up, unlike self-normalization would
+    flat = 1e-4 * torch.randn(2, 32, 32)
+    assert depth_anchor_loss(flat, depth, 1.0, 1.0).max() < 2 * depth_anchor_loss(other, depth, 1.0, 1.0).max()
+    flat.requires_grad_(True)
+    depth_anchor_loss(flat, depth, 1.0, 1.0).sum().backward()
+    assert torch.isfinite(flat.grad).all() and flat.grad.abs().max() < 1e3
     print("loss OK")
 
 
@@ -159,7 +166,10 @@ def test_integration():
         assert any(k.startswith("depth_anchor/loss_") for k in tb.scalars)
         preview = tb.images["depth_anchor/preview"][0]
         assert preview.shape == (3, 64, 256), preview.shape  # 4 tiles of 64x64
-        print(f"integration OK, depth losses {[round(v, 4) for v in tb.scalars['loss/depth_anchor']]}")
+        ratios = tb.scalars["depth_anchor/push_ratio"]
+        assert all(r > 0 for r in ratios), ratios
+        print(f"integration OK, depth losses {[f"{v:.2e}" for v in tb.scalars['loss/depth_anchor']]}, "
+              f"push ratios {[f"{r:.2e}" for r in ratios]}")
 
     # the anchor's gradient alone reaches the LoRA
     with tempfile.TemporaryDirectory() as tmp:
