@@ -122,6 +122,12 @@ Supported models: Anima. Adding one = a small adapter class in `modules/trainer/
 
 ## Feature: depth anchor
 
+**Status: experimental, off by default.** Tested on Anima (person LoRA, int8, Depth Anything V2 Small): at weights
+0.01–0.02 it had no measurable effect; at 0.2 it slowed likeness learning while improving the depth loss by only
+~1–3%. At high noise the predicted image is a blur whose depth can not be matched, so most of the anchor's gradient
+is noise. The old alternating mode (`loss_split`) blocked likeness entirely. `depth_anchor/push_ratio` (measured at
+the model output) greatly overstates the anchor's real influence on the LoRA.
+
 Adds a 3D-structure loss to normal image training. Each step, the model's predicted clean image (computed from the
 step's own outputs, no extra model forward) and the training image are decoded by a tiny latent decoder and run
 through a frozen depth estimator; the difference between the two depth maps is added to the loss. Gradients flow
@@ -188,9 +194,9 @@ smaller weight (the perceptual repo uses 0.005 with V2 Large).
 ### What to watch
 
 - `loss/depth_anchor` and `depth_anchor/loss_{high,mid,low}_noise`.
-- `depth_anchor/push_ratio` (logged with each preview): how hard the anchor pushes compared to the diffusion loss
-  (ratio of their gradients at the model output). Around 0.1–0.3 is a reasonable start; near or above 1 the anchor
-  dominates.
+- `depth_anchor/push_ratio` (logged with each preview): ratio of the anchor's and the diffusion loss's gradients at
+  the model output. It overstates the anchor's real influence by a large factor (see Status), so treat it as a
+  rough relative number only.
 - `depth_anchor/preview`: training image | its depth | predicted image | predicted depth (noise level in
   `depth_anchor/preview_sigma`). Check that the depth maps look sensible on your images: depth models are trained
   mostly on photos.
