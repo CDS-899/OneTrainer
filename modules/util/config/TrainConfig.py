@@ -11,6 +11,7 @@ from modules.util.config.ContextDistillationConfig import ContextDistillationCon
 from modules.util.config.DepthAnchorConfig import DepthAnchorConfig
 from modules.util.config.SampleConfig import SampleConfig
 from modules.util.config.SecretsConfig import SecretsConfig
+from modules.util.config.SoarConfig import SoarConfig
 from modules.util.enum.AttentionMechanism import AttentionMechanism
 from modules.util.enum.AudioFormat import AudioFormat
 from modules.util.enum.ConfigPart import ConfigPart
@@ -494,6 +495,7 @@ class TrainConfig(BaseConfig):
     # fork extensions
     context_distillation: ContextDistillationConfig
     depth_anchor: DepthAnchorConfig
+    soar: SoarConfig
 
     # text encoder
     text_encoder: TrainModelPartConfig
@@ -1178,6 +1180,7 @@ class TrainConfig(BaseConfig):
         # fork extensions
         data.append(("context_distillation", ContextDistillationConfig.default_values(), ContextDistillationConfig, False))
         data.append(("depth_anchor", DepthAnchorConfig.default_values(), DepthAnchorConfig, False))
+        data.append(("soar", SoarConfig.default_values(), SoarConfig, False))
 
         # text encoder
         text_encoder = TrainModelPartConfig.default_values()

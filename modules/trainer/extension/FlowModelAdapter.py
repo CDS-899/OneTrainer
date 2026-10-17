@@ -2,7 +2,9 @@ import copy
 import os
 import urllib.request
 from abc import ABCMeta, abstractmethod
+from random import Random
 
+import modules.util.multi_gpu_util as multi
 from modules.model.BaseModel import BaseModel
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
 from modules.util.config.TrainConfig import TrainConfig
@@ -68,6 +70,47 @@ class FlowModelAdapter(metaclass=ABCMeta):
         sigma_b = sigma.view(-1, *([1] * (clean.dim() - 1)))
         predicted = clean + sigma_b * (model_output_data['target'].float() - model_output_data['predicted'].float())
         return predicted, clean, sigma
+
+    def velocity_at_timestep(self, latents: Tensor, timestep: Tensor, conditioning: Tensor) -> Tensor:
+        """
+        Model prediction v at a discrete training timestep (as drawn by predict()), passed to the model exactly the
+        way predict() passes it, so extra forward passes match the training step's own.
+        """
+        return self.velocity(latents, self.sigma_from_timestep(timestep), conditioning)
+
+    def timestep_from_sigma(self, sigma: Tensor) -> Tensor:
+        """The discrete training timestep closest to sigma (inverse of sigma_from_timestep)."""
+        num_train_timesteps = self.model.noise_scheduler.config['num_train_timesteps']
+        return (sigma.float() * num_train_timesteps).round().long().sub(1).clamp(0, num_train_timesteps - 1)
+
+    def batch_conditioning(self, batch: dict, train_progress) -> Tensor:
+        """
+        The text conditioning predict() used for this batch, including the same text encoder dropout.
+        Needs the text encoder frozen (cached embeddings or no gradients through the text encoder).
+        """
+        raise NotImplementedError(f"batch_conditioning is not implemented for {self.config.model_type}")
+
+    def next_sampling_sigma(self, sigma: Tensor, schedule: Tensor) -> Tensor:
+        """
+        The noise level one sampling step after sigma on a descending schedule from sampling_sigmas() (ending in 0).
+        sigma between two schedule points moves by the same fraction of the following step.
+        """
+        sigma = sigma.float()
+        ascending = schedule.flip(0).to(device=sigma.device, dtype=torch.float32)
+        last = schedule.shape[0] - 1
+        # fractional position p of sigma in the descending schedule: schedule[p] == sigma
+        upper = torch.searchsorted(ascending, sigma.clamp(0.0, float(ascending[-1]))).clamp(1, last)
+        lo, hi = ascending[upper - 1], ascending[upper]
+        frac = ((sigma - lo) / (hi - lo).clamp_min(1e-12)).clamp(0.0, 1.0)
+        position = (last - upper).float() + (1.0 - frac)
+        # one step further
+        nxt = position + 1.0
+        index = nxt.floor().long().clamp(0, last)
+        index_next = (index + 1).clamp(max=last)
+        g = (nxt - nxt.floor()).clamp(0.0, 1.0)
+        desc = schedule.to(device=sigma.device, dtype=torch.float32)
+        result = desc[index] * (1.0 - g) + desc[index_next] * g
+        return torch.where(nxt >= last, torch.zeros_like(result), result)
 
     # ---------------------------------------------------------------- tiny decoder
 
@@ -179,7 +222,7 @@ class AnimaFlowAdapter(FlowModelAdapter):
             text=prompts,
         )
 
-    def velocity(self, latents: Tensor, sigma: Tensor, conditioning: Tensor) -> Tensor:
+    def _transformer(self, latents: Tensor, model_timestep: Tensor, conditioning: Tensor) -> Tensor:
         model = self.model
         dtype = model.train_dtype.torch_dtype()
         # CosmosTransformer3DModel takes padding_mask in pixel space and repeats it per batch item itself
@@ -187,11 +230,34 @@ class AnimaFlowAdapter(FlowModelAdapter):
         with model.autocast_context:
             return model.transformer(
                 hidden_states=latents.to(dtype=dtype),
-                timestep=sigma.to(device=latents.device, dtype=torch.float32),
+                timestep=model_timestep,
                 encoder_hidden_states=conditioning.to(device=latents.device, dtype=dtype),
                 padding_mask=padding_mask,
                 return_dict=False,
             )[0]
+
+    def velocity(self, latents: Tensor, sigma: Tensor, conditioning: Tensor) -> Tensor:
+        return self._transformer(latents, sigma.to(device=latents.device, dtype=torch.float32), conditioning)
+
+    def velocity_at_timestep(self, latents: Tensor, timestep: Tensor, conditioning: Tensor) -> Tensor:
+        # as in BaseAnimaSetup.predict
+        return self._transformer(latents, timestep.to(device=latents.device) / 1000, conditioning)
+
+    def batch_conditioning(self, batch: dict, train_progress) -> Tensor:
+        # same call and the same seeded dropout as BaseAnimaSetup.predict
+        config = self.config
+        batch_seed = train_progress.global_step * multi.world_size() + multi.rank()
+        with self.model.autocast_context:
+            return self.model.encode_text(
+                train_device=self.train_device,
+                batch_size=batch['latent_image'].shape[0],
+                rand=Random(batch_seed),
+                tokens=batch.get("tokens"),
+                tokens_mask=batch.get("tokens_mask"),
+                text_encoder_output=batch['text_encoder_hidden_state'] \
+                    if 'text_encoder_hidden_state' in batch and not config.train_text_encoder_or_embedding() else None,
+                text_encoder_dropout_probability=config.text_encoder.dropout_probability,
+            )
 
     def latent_shape(self, batch_size: int, height: int, width: int) -> tuple[int, ...]:
         # 5D video-style latents with a single frame

@@ -168,8 +168,8 @@ def test_integration():
         assert preview.shape == (3, 64, 256), preview.shape  # 4 tiles of 64x64
         ratios = tb.scalars["depth_anchor/push_ratio"]
         assert all(r > 0 for r in ratios), ratios
-        print(f"integration OK, depth losses {[f"{v:.2e}" for v in tb.scalars['loss/depth_anchor']]}, "
-              f"push ratios {[f"{r:.2e}" for r in ratios]}")
+        print(f"integration OK, depth losses {[f'{v:.2e}' for v in tb.scalars['loss/depth_anchor']]}, "
+              f"push ratios {[f'{r:.2e}' for r in ratios]}")
 
     # the anchor's gradient alone reaches the LoRA
     with tempfile.TemporaryDirectory() as tmp:

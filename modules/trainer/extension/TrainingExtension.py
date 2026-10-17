@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from modules.util.TrainProgress import TrainProgress
@@ -53,11 +54,12 @@ class TrainingExtension:
             trainer: "GenericTrainer",
             batch: dict | None,
             train_progress: TrainProgress,
-    ) -> Tensor | None:
+    ) -> Tensor | Iterable[Tensor] | None:
         """
-        Returns an extra loss for this step, or None to skip.
-        batch is None in standalone mode. The returned loss is divided by the gradient accumulation
-        steps by the trainer, like the image loss.
+        Returns an extra loss for this step, an iterable (e.g. a generator) of several losses, or None to skip.
+        Each loss is back-propagated before the next one is requested, so a generator keeps only one graph alive.
+        batch is None in standalone mode. Every loss is divided by the gradient accumulation steps by the trainer,
+        like the image loss.
         """
         return None
 

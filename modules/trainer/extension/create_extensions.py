@@ -13,6 +13,10 @@ def create_training_extensions(config: TrainConfig) -> list[TrainingExtension]:
         from modules.trainer.extension.DepthAnchor import DepthAnchor
         extensions.append(DepthAnchor(config))
 
+    if config.soar.enabled:
+        from modules.trainer.extension.Soar import Soar
+        extensions.append(Soar(config))
+
     if sum(ext.is_standalone() for ext in extensions) > 1:
         raise ValueError("Only one training extension can run in standalone mode")
 

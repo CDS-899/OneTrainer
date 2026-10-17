@@ -688,9 +688,14 @@ class GenericTrainer(BaseTrainer):
         if batch is not None:
             yield self._image_loss(batch, train_progress)
         for ext in self.extensions:
-            loss = ext.compute_loss(self, batch, train_progress)
-            if loss is not None:
-                yield loss
+            losses = ext.compute_loss(self, batch, train_progress)
+            if losses is None:
+                continue
+            if isinstance(losses, Tensor):
+                yield losses
+            else:
+                # an iterable of losses: each one is back-propagated before the next is computed
+                yield from losses
 
     def train(self):
         train_device = torch.device(self.config.train_device)

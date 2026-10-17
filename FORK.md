@@ -202,6 +202,54 @@ smaller weight (the perceptual repo uses 0.005 with V2 Large).
   mostly on photos.
 - Only image batches with the normal flow-matching target are anchored (prior-prediction samples are skipped).
 
+## Feature: SOAR (self-correction during image training)
+
+From Tencent's HY-SOAR (arXiv 2604.12617), written from the paper and its algorithm. Normal training only shows the
+model noisy versions of real images, but when sampling it continues from its own slightly wrong states, and small
+errors pile up. On SOAR steps, after the normal prediction:
+
+1. **Rollout**: from the step's noisy image the model takes one sampling step itself, with CFG against the empty
+   prompt (one step of a `rollout_steps` schedule).
+2. **Correction points**: that state is re-noised toward the same noise, at random noise levels up to pure noise.
+3. Each point is trained toward the velocity that leads from it straight back to the real image. If the model's step
+   was perfect, this is exactly the normal target, so SOAR never pulls away from the training images.
+
+The loss of a SOAR step is `(normal + weight * sum(points)) / (1 + weight * N)`, as in the paper. For a "final stage",
+resume a normally trained LoRA or fine-tune with `soar.enabled` on.
+
+Cost per SOAR step (compared to a normal step): one extra forward pass without gradients for CFG (none with
+`rollout_cfg: 1`; the conditional half reuses the normal prediction), plus one forward and backward per correction
+point. Roughly 2.3x with 1 point and CFG, 3.3x with 2. Each point is back-propagated on its own, so the memory peak
+stays that of a normal step (except with fused back pass, where all losses of a step share one backward). The extra
+passes use the same batch shape as the normal step, so compiled graphs are reused.
+
+The empty prompt is encoded once and cached in `<cache dir>/soar/` (cleared by *Clear cache before training*, then
+re-encoded at the next start). Needs a frozen text encoder. Prior-prediction batches are skipped.
+
+### Settings (`soar` block)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch |
+| `correction_points` | `1` | Correction points per SOAR step: the main cost dial (paper: 6) |
+| `weight` | `1.0` | Weight of each point relative to the normal loss (paper: 1) |
+| `rollout_cfg` | `4.5` | CFG of the rollout step against the empty prompt. `1` = no CFG, no extra pass |
+| `rollout_steps` | `20` | The rollout takes one step of a sampling schedule with this many steps |
+| `every_n_steps` | `1` | SOAR on every n-th optimizer step, normal training on the others |
+
+Prefer more steps with few points over many points every few steps: the points of one step share one image, noise
+and rollout, so they are strongly correlated.
+
+### What to watch
+
+- `loss/soar` and `soar/loss_{high,mid,low}_noise`: the correction loss. It is larger than the normal loss because
+  low-noise points ask for the whole remaining error at once.
+- `soar/rollout_error`: RMS distance between the model's own rollout step and the training trajectory, the error
+  SOAR corrects. It should shrink as training goes on.
+- Samples: compare with a normal run at the same steps, for likeness and for hands, eyes and mushy details.
+
+Preset: `#anima LoRA soar`.
+
 ## Code layout
 
 | File | Purpose |
@@ -212,6 +260,8 @@ smaller weight (the perceptual repo uses 0.005 with V2 Large).
 | `modules/trainer/extension/FlowModelAdapter.py` | Per-model operations (text encoding, velocity, latent shape) |
 | `modules/util/config/ContextDistillationConfig.py` | The `context_distillation` config block |
 | `modules/trainer/extension/DepthAnchor.py` | Depth anchor |
+| `modules/trainer/extension/Soar.py` | SOAR |
+| `modules/util/config/SoarConfig.py` | The `soar` config block |
 | `modules/trainer/extension/perceptual/` | Depth model wrappers, vendored TAEHV tiny decoder (MIT) |
 | `modules/trainer/extension/noise_bands.py` | Per-noise-band loss logging |
 | `modules/util/config/DepthAnchorConfig.py` | The `depth_anchor` config block |
@@ -225,4 +275,5 @@ python -m tests.fork.test_context_distillation_cpu
 python -m tests.fork.test_generic_trainer_cpu
 python -m tests.fork.test_prompt_files_and_cache_cpu
 python -m tests.fork.test_depth_anchor_cpu
+python -m tests.fork.test_soar_cpu
 ```
