@@ -6,6 +6,8 @@ Run: python -m tests.fork.test_soar_cpu
   - one sampling step later on a schedule, between and on schedule points
   - the extra passes see the model exactly as the training step does (same conditioning, same timestep)
   - SOAR steps: normal loss scaled by 1 / (1 + weight * N), N separately back-propagated correction losses
+  - min_noise: samples below it get normal training only (zero weight in the correction losses); a rollout that
+    ends at zero noise is never corrected
   - integrated in GenericTrainer: trains only the LoRA, logs, every_n_steps, fused back pass, empty prompt cache
 """
 import os
@@ -80,8 +82,9 @@ def test_matches_training_step():
 
 def test_step_losses():
     with tempfile.TemporaryDirectory() as tmp:
-        trainer, model, ext = soar_trainer(tmp, correction_points=3, weight=0.5, every_n_steps=2)
+        trainer, model, ext = soar_trainer(tmp, correction_points=3, weight=0.5, every_n_steps=2, min_noise=0.0)
         ext.on_train_start(trainer)
+        ext.schedule = torch.linspace(1.0, 0.0, 1001)  # fine schedule: no sample's rollout ends at zero noise
         batch = next(iter(trainer.data_loader.get_data_loader()))
         image_loss = torch.tensor(2.0)
         for step, fires in ((0, True), (1, False), (2, True)):
@@ -103,6 +106,68 @@ def test_step_losses():
                 count += 1
             assert count == 3
     print("SOAR step losses OK")
+
+
+def two_sample_batch(trainer):
+    it = iter(trainer.data_loader.get_data_loader())
+    a, b = next(it), next(it)
+    return {
+        'latent_image': torch.cat([a['latent_image'], b['latent_image']]),
+        'text_encoder_hidden_state': torch.cat([a['text_encoder_hidden_state'], b['text_encoder_hidden_state']]),
+        'concept_type': a['concept_type'] + b['concept_type'],
+        'loss_weight': torch.ones(2),
+    }
+
+
+def test_noise_window():
+    with tempfile.TemporaryDirectory() as tmp:
+        trainer, model, ext = soar_trainer(tmp, correction_points=2, weight=1.0)
+        ext.on_train_start(trainer)
+        ext.schedule = torch.linspace(1.0, 0.0, 1001)
+        image_loss = torch.tensor(2.0)
+        batch = two_sample_batch(trainer)
+        progress = TrainProgress(global_step=0)
+        out = trainer.model_setup.predict(model, batch, trainer.config, progress)
+        low, high = sorted(float(s) for s in ext.adapter.sigma_from_timestep(out['timestep']))
+        assert high - low > 0.02, (low, high)
+
+        def step(min_noise):
+            trainer.config.soar.min_noise = min_noise
+            adjusted = ext.adjust_image_loss(trainer, batch, out, image_loss, progress)
+            losses = ext.compute_loss(trainer, batch, progress)
+            return adjusted, (None if losses is None else list(losses))
+
+        # both samples below min_noise: normal training only, no extra passes
+        adjusted, losses = step(min(high + 0.01, 0.999))
+        assert adjusted is image_loss and losses is None
+        # one sample active: the paper's normalization counts only its points
+        adjusted, losses = step((low + high) / 2)
+        assert torch.isclose(adjusted, image_loss / 2.0), adjusted  # 1 + 1 * 2 * 0.5
+        assert len(losses) == 2
+        # both active
+        adjusted, losses = step(max(low - 0.01, 0.0))
+        assert torch.isclose(adjusted, image_loss / 3.0) and len(losses) == 2
+
+        # the inactive sample has zero weight in the correction losses: its latent does not change them
+        trainer.config.soar.min_noise = (low + high) / 2
+        inactive = int(ext.adapter.sigma_from_timestep(out['timestep']).argmin())
+        values = []
+        for scale in (1.0, 3.0):
+            changed = dict(batch, latent_image=batch['latent_image'].clone())
+            changed['latent_image'][inactive] *= scale
+            o = dict(out, target=out['target'].clone())
+            ext.adjust_image_loss(trainer, changed, o, image_loss, progress)
+            with torch.no_grad():
+                values.append([float(loss) for loss in ext.compute_loss(trainer, changed, progress)])
+        # (the inactive sample still shares the batch, so only its own contribution must vanish)
+        assert all(abs(a - b) < 1e-5 for a, b in zip(values[0], values[1], strict=True)), values
+
+        # a rollout that ends at zero noise is never corrected, even with min_noise 0
+        trainer.config.soar.min_noise = 0.0
+        ext.schedule = torch.tensor([1.0, 0.0])
+        adjusted, losses = step(0.0)
+        assert adjusted is image_loss and losses is None
+    print("noise window OK")
 
 
 def test_integration(fused_back_pass=False):
@@ -147,6 +212,7 @@ if __name__ == "__main__":
     test_next_sigma()
     test_matches_training_step()
     test_step_losses()
+    test_noise_window()
     test_integration()
     test_integration(fused_back_pass=True)
     print("ALL OK")

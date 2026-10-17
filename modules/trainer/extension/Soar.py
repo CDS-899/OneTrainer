@@ -64,6 +64,10 @@ class Soar(TrainingExtension):
 
     The loss of a SOAR step is (normal + weight * sum(points)) / (1 + weight * N), as in the paper. Each point is
     back-propagated on its own, so the memory peak stays that of a normal step.
+
+    Unlike the paper, samples below min_noise (and rollouts ending at zero noise) get normal training only: there the
+    correction target divides a small texture error by a tiny noise level, which with small batches caused loss
+    spikes and a mesh texture in samples.
     """
 
     def __init__(self, config: TrainConfig):
@@ -75,6 +79,8 @@ class Soar(TrainingExtension):
             raise ValueError("soar.rollout_steps must be at least 1")
         if self.soar.weight <= 0:
             raise ValueError("soar.weight must be positive")
+        if not 0.0 <= self.soar.min_noise < 1.0:
+            raise ValueError("soar.min_noise must be in [0, 1)")
         if config.train_text_encoder_or_embedding():
             raise NotImplementedError("SOAR needs a frozen text encoder (the correction points reuse its output)")
 
@@ -128,8 +134,9 @@ class Soar(TrainingExtension):
     def fires(self, train_progress: TrainProgress) -> bool:
         return self._update_step(train_progress) % max(1, self.soar.every_n_steps) == 0
 
-    def _normalizer(self) -> float:
-        return 1.0 + self.soar.weight * self.soar.correction_points
+    def _normalizer(self, active_fraction: float) -> float:
+        # paper: (sum(normal) + weight * sum(points)) / (B + weight * points), with points counted over active samples
+        return 1.0 + self.soar.weight * self.soar.correction_points * active_fraction
 
     def adjust_image_loss(
             self,
@@ -146,15 +153,29 @@ class Soar(TrainingExtension):
             # prior-prediction samples replace the target, so the real image can not be recovered from it
             return loss
 
+        # SOAR only for samples starting at min_noise or above, and whose rollout step does not end at zero noise
+        # (there the correction target would divide the error of the model's own clean image by a tiny noise level)
+        timestep = model_output_data['timestep'].detach()
+        sigma = self.adapter.sigma_from_timestep(timestep)
+        rollout_sigma = self.adapter.next_sampling_sigma(sigma, self.schedule)
+        active = (sigma >= self.soar.min_noise) & (rollout_sigma > 0)
+        if not bool(active.any()):
+            return loss
+        active_fraction = float(active.float().mean())
+
         # only detached tensors are kept: the correction points run after this loss has been back-propagated
         self._pending = {
             'batch': batch,
-            'timestep': model_output_data['timestep'].detach(),
+            'timestep': timestep,
+            'sigma': sigma,
+            'rollout_sigma': rollout_sigma,
+            'active': active,
+            'active_fraction': active_fraction,
             'predicted': model_output_data['predicted'].detach(),
             'target': model_output_data['target'].detach(),
             'train_progress': train_progress,
         }
-        return loss / self._normalizer()
+        return loss / self._normalizer(active_fraction)
 
     @torch.no_grad()
     def _rollout(self, trainer: "GenericTrainer", pending: dict) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -163,7 +184,7 @@ class Soar(TrainingExtension):
         clean = adapter.clean_latents(batch).float()
         noise = pending['target'].float() + clean
         timestep = pending['timestep']
-        sigma = adapter.sigma_from_timestep(timestep).to(clean.device)
+        sigma = pending['sigma'].to(clean.device)
         b = sigma.view(-1, *([1] * (clean.dim() - 1)))
         noisy = (1.0 - b) * clean + b * noise
 
@@ -173,13 +194,14 @@ class Soar(TrainingExtension):
             uncond = adapter.velocity_at_timestep(noisy, timestep, empty).float()
             velocity = uncond + self.soar.rollout_cfg * (velocity - uncond)
 
-        rollout_sigma = adapter.next_sampling_sigma(sigma, self.schedule)
+        rollout_sigma = pending['rollout_sigma'].to(clean.device)
         rb = rollout_sigma.view_as(b)
         rolled_out = noisy + (rb - b) * velocity
 
         # how far the model's own step lands from the training trajectory (the error SOAR corrects)
         on_trajectory = (1.0 - rb) * clean + rb * noise
-        self._rollout_error += float((rolled_out - on_trajectory).pow(2).mean().sqrt())
+        active = pending['active'].to(clean.device)
+        self._rollout_error += float((rolled_out - on_trajectory)[active].pow(2).mean().sqrt())
         self._rollout_count += 1
         return clean, noise, rolled_out, rollout_sigma, sigma
 
@@ -190,9 +212,14 @@ class Soar(TrainingExtension):
         with torch.no_grad():
             conditioning = adapter.batch_conditioning(batch, train_progress)
 
+        # inactive samples keep their place in the batch (same shapes for compiled graphs) with zero loss weight
+        active = pending['active'].to(clean.device)
+        point_batch = dict(batch)
+        point_batch['loss_weight'] = batch['loss_weight'] * active.to(batch['loss_weight'].dtype)
+
         self.generator.manual_seed(train_progress.global_step * 1_000_003 + 7)
         low = rollout_sigma.clamp_min(MIN_CORRECTION_SIGMA)
-        point_weight = self.soar.weight / self._normalizer()
+        point_weight = self.soar.weight / self._normalizer(pending['active_fraction'])
         for _ in range(self.soar.correction_points):
             with torch.no_grad():
                 u = torch.rand(clean.shape[0], generator=self.generator, device=self.generator.device)
@@ -205,11 +232,11 @@ class Soar(TrainingExtension):
             predicted = adapter.velocity_at_timestep(latent, timestep, conditioning)
             data = {'loss_type': 'target', 'timestep': timestep, 'predicted': predicted, 'target': target}
             # OneTrainer's own loss settings (MSE/MAE/huber strengths, masks, loss weights) apply as for the image loss
-            loss = trainer.model_setup.calculate_loss(trainer.model, batch, data, self.config)
+            loss = trainer.model_setup.calculate_loss(trainer.model, point_batch, data, self.config)
 
             with torch.no_grad():
                 per_sample = (predicted.float() - target).pow(2).mean(dim=list(range(1, target.dim())))
-                self.band_loss.record(per_sample, sigma)
+                self.band_loss.record(per_sample[active], sigma[active])
             yield loss * point_weight
 
     def compute_loss(

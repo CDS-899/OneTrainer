@@ -34,6 +34,7 @@
         "weight": 1.0,
         "rollout_cfg": 4.5,
         "rollout_steps": 20,
-        "every_n_steps": 1
+        "every_n_steps": 1,
+        "min_noise": 0.2
     }
 }

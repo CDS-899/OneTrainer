@@ -214,10 +214,16 @@ errors pile up. On SOAR steps, after the normal prediction:
 3. Each point is trained toward the velocity that leads from it straight back to the real image. If the model's step
    was perfect, this is exactly the normal target, so SOAR never pulls away from the training images.
 
-The loss of a SOAR step is `(normal + weight * sum(points)) / (1 + weight * N)`, as in the paper. For a "final stage",
-resume a normally trained LoRA or fine-tune with `soar.enabled` on.
+The loss of a SOAR step is `(normal + weight * sum(points)) / (1 + weight * N)`, as in the paper (points counted over
+the samples SOAR applies to). For a "final stage", resume a normally trained LoRA or fine-tune with `soar.enabled` on.
 
-Cost per SOAR step (compared to a normal step): one extra forward pass without gradients for CFG (none with
+**Difference from the paper: no SOAR at low noise.** Samples whose training noise level is below `min_noise` get
+normal training only, and a rollout step that ends at zero noise is never corrected. Near zero noise the correction
+target divides a small texture error by a tiny noise level: in the first Anima test (batch 2, SOAR at all noise
+levels) these points caused loss spikes of 20-40x and a regular mesh texture in samples. The paper trains with batch
+32, where such points average out. Low-noise steps only refine texture, so little is lost.
+
+Cost per SOAR step (compared to a normal step; first Anima test: 1.85x with 1 point and CFG): one extra forward pass without gradients for CFG (none with
 `rollout_cfg: 1`; the conditional half reuses the normal prediction), plus one forward and backward per correction
 point. Roughly 2.3x with 1 point and CFG, 3.3x with 2. Each point is back-propagated on its own, so the memory peak
 stays that of a normal step (except with fused back pass, where all losses of a step share one backward). The extra
@@ -236,6 +242,7 @@ re-encoded at the next start). Needs a frozen text encoder. Prior-prediction bat
 | `rollout_cfg` | `4.5` | CFG of the rollout step against the empty prompt. `1` = no CFG, no extra pass |
 | `rollout_steps` | `20` | The rollout takes one step of a sampling schedule with this many steps |
 | `every_n_steps` | `1` | SOAR on every n-th optimizer step, normal training on the others |
+| `min_noise` | `0.2` | SOAR only for samples at this training noise level or above; the others get normal training |
 
 Prefer more steps with few points over many points every few steps: the points of one step share one image, noise
 and rollout, so they are strongly correlated.
@@ -249,6 +256,13 @@ and rollout, so they are strongly correlated.
 - Samples: compare with a normal run at the same steps, for likeness and for hands, eyes and mushy details.
 
 Preset: `#anima LoRA soar`.
+
+### Test results
+
+Anima person LoRA (int8, batch 2, 1000 steps), SOAR at all noise levels (before `min_noise`) vs normal training,
+same seed: at the same step SOAR was closer to the training image for the exact training prompt (step 950), about
+even at equal GPU time. Other prompts showed a regular mesh texture, traced to the low-noise correction points, which
+`min_noise` now excludes. Not yet re-tested.
 
 ## Code layout
 
