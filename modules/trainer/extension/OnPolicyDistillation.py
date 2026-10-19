@@ -296,17 +296,12 @@ class OnPolicyDistillation(TrainingExtension):
 
 
 class SmdDistillation(OnPolicyDistillation):
-    """SMD few-step distillation: fewer steps and CFG 1 at once (no Pivot)."""
+    """
+    SMD distillation (no Pivot): the student samples at CFG 1 in student_steps steps. With few steps it distills steps
+    and CFG at once; with the normal step count it is CFG-only distillation.
+    """
 
     def __init__(self, config: TrainConfig):
         block = config.smd_distillation
         super().__init__(config, "smd_distillation", block, block.student_steps, block.teacher_cfg,
                          block.repulsion_weight, block.queries)
-
-
-class CfgDistillation(OnPolicyDistillation):
-    """CFG distillation: the student keeps the step count and learns to sample without CFG."""
-
-    def __init__(self, config: TrainConfig):
-        block = config.cfg_distillation
-        super().__init__(config, "cfg_distillation", block, block.steps, block.teacher_cfg, 0.0, block.queries)

@@ -264,11 +264,11 @@ same seed: at the same step SOAR was closer to the training image for the exact 
 even at equal GPU time. Other prompts showed a regular mesh texture, traced to the low-noise correction points, which
 `min_noise` now excludes. Not yet re-tested.
 
-## Feature: on-policy distillation (`smd_distillation`, `cfg_distillation`)
+## Feature: SMD distillation (`smd_distillation`)
 
-Prompt-only distillation of a LoRA that samples faster. Both blocks share one mechanism, the core of SMD
-(*Simplified Matching Distillation*, arXiv 2610.18472, written from the paper; its training-only Pivot head is not
-included: on images it changed scores by under 1%).
+Prompt-only distillation of a LoRA that samples faster: the core of SMD (*Simplified Matching Distillation*,
+arXiv 2610.18472, written from the paper; its training-only Pivot head is not included: on images it changed scores
+by under 1%).
 
 - **Student**: base model + LoRA, samples with plain Euler on the model's own schedule, at CFG 1.
 - **Teacher**: the same model with the LoRA off, at CFG `teacher_cfg` against `negative_prompt`.
@@ -280,10 +280,9 @@ included: on images it changed scores by under 1%).
 - No helper "fake" model and no discriminator (the parts that make DMD / TDM unstable): plain regression onto the
   teacher.
 
-| Block | What it does | Use |
-|---|---|---|
-| `smd_distillation` | Fewer steps *and* CFG 1 (default 4 steps, teacher CFG 5) | Fast final model |
-| `cfg_distillation` | Same steps, CFG 1 (default 20 steps, teacher CFG 4.5) | 2x faster sampling with the same look |
+`student_steps: 4` (default) distills steps and CFG at once. With `student_steps` at your normal step count (e.g. 20)
+it is CFG-only distillation: same steps and look, 2x faster sampling (set `repulsion_weight: 0` for a plain copy of
+the teacher).
 
 Sample the result with Euler, the same step count and CFG 1 (set the sample settings accordingly; in ComfyUI use the
 model's normal schedule). The training is standalone (no image data set); batch size and epochs come from the main
@@ -299,12 +298,9 @@ settings. Requires LoRA training.
 
 The paper found ~300 prompts already enough and even a single prompt to work, but the *kind* of prompts matters:
 training on text-heavy prompts improved text rendering the most. Cover what the model should be good at.
-Prompts are encoded once and cached in `<cache dir>/smd_distillation/` or `cfg_distillation/` (about 1 MB each for
-Anima). Example: `docs/fork/example_prompts.jsonl`.
+Prompts are encoded once and cached in `<cache dir>/smd_distillation/` (about 1 MB each for Anima). Example: `docs/fork/example_prompts.jsonl`.
 
 ### Settings
-
-`smd_distillation`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -318,16 +314,13 @@ Anima). Example: `docs/fork/example_prompts.jsonl`.
 | `negative_prompt` | `""` | Negative prompt for the teacher's CFG and the repulsion |
 | `seed` | `42` | Seed for noise and query points |
 
-`cfg_distillation`: `enabled`, `prompts_path`, `resolution`, `steps` (`20`), `teacher_cfg` (`4.5`), `queries` (`1`),
-`negative_prompt`, `seed`, with the same meanings. Set `steps` and `teacher_cfg` like your normal sampling.
-
 Cost per training step: one student forward and backward plus, per query, two teacher forwards without gradients
 (one when `teacher_cfg` is 1 and there is no repulsion). The paper trained Qwen-Image for 1,000 iterations at batch 16,
-learning rate 1e-4, rank-256 LoRA. Presets: `#anima LoRA smd distillation`, `#anima LoRA cfg distillation`.
+learning rate 1e-4, rank-256 LoRA. Preset: `#anima LoRA smd distillation`.
 
 ### What to watch
 
-- `loss/smd_distillation` (or `cfg_distillation`) and its noise bands: the distance between the student's and the
+- `loss/smd_distillation` and its noise bands: the distance between the student's and the
   teacher's velocity. The high-noise band decides composition.
 - `smd_distillation/repulsion_distance`: distance from the negative-prompt prediction; it should grow a little.
 - Samples at the student's step count and CFG 1.
@@ -343,8 +336,8 @@ learning rate 1e-4, rank-256 LoRA. Presets: `#anima LoRA smd distillation`, `#an
 | `modules/util/config/ContextDistillationConfig.py` | The `context_distillation` config block |
 | `modules/trainer/extension/DepthAnchor.py` | Depth anchor |
 | `modules/trainer/extension/Soar.py` | SOAR |
-| `modules/trainer/extension/OnPolicyDistillation.py` | SMD and CFG distillation (shared on-policy core) |
-| `modules/util/config/SmdDistillationConfig.py`, `CfgDistillationConfig.py` | Their config blocks |
+| `modules/trainer/extension/OnPolicyDistillation.py` | SMD distillation |
+| `modules/util/config/SmdDistillationConfig.py` | The `smd_distillation` config block |
 | `modules/util/config/SoarConfig.py` | The `soar` config block |
 | `modules/trainer/extension/perceptual/` | Depth model wrappers, vendored TAEHV tiny decoder (MIT) |
 | `modules/trainer/extension/noise_bands.py` | Per-noise-band loss logging |

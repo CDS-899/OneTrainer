@@ -6,6 +6,7 @@ class SmdDistillationConfig(BaseConfig):
     SMD few-step distillation (Simplified Matching Distillation, arXiv 2610.18472, without its Pivot), prompts only:
     the student (base + LoRA) samples in student_steps steps at CFG 1 and learns to match the teacher (the same model,
     LoRA off, at teacher_cfg) along its own trajectory. Standalone training, no image data set.
+    With student_steps at the normal sampling step count it is CFG-only distillation (same steps, no CFG).
     """
 
     enabled: bool
@@ -28,7 +29,8 @@ class SmdDistillationConfig(BaseConfig):
         data.append(("prompts_path", "", str, False))
         # same format as the training resolution ("512", "512,1024" or "768x512"). Empty = the training resolution.
         data.append(("resolution", "", str, False))
-        # sampling steps of the distilled student (Euler, the model's own schedule, CFG 1)
+        # sampling steps of the distilled student (Euler, the model's own schedule, CFG 1).
+        # Your normal step count = CFG-only distillation
         data.append(("student_steps", 4, int, False))
         # CFG of the teacher target, against negative_prompt
         data.append(("teacher_cfg", 5.0, float, False))

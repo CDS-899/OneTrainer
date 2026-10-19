@@ -1,5 +1,5 @@
 """
-CPU tests of the on-policy distillations (smd_distillation, cfg_distillation) with a tiny random Anima transformer.
+CPU tests of SMD distillation (smd_distillation) with a tiny random Anima transformer.
 
 Run: python -m tests.fork.test_on_policy_distillation_cpu
   - prompt file parsing
@@ -7,6 +7,7 @@ Run: python -m tests.fork.test_on_policy_distillation_cpu
   - the teacher is the model with the LoRA off, with CFG and (for SMD) a negative-prompt reference
   - only LoRA parameters receive gradients
   - learning: after training, the few-step student lands closer to the many-step CFG teacher from the same noise
+    (also as CFG-only distillation: more student steps, no repulsion)
   - epochs, and standalone training in GenericTrainer
 """
 import json
@@ -15,7 +16,7 @@ import tempfile
 from contextlib import contextmanager
 
 from modules.trainer.extension.FlowModelAdapter import AnimaFlowAdapter
-from modules.trainer.extension.OnPolicyDistillation import CfgDistillation, SmdDistillation, load_prompts
+from modules.trainer.extension.OnPolicyDistillation import SmdDistillation, load_prompts
 from modules.util.TrainProgress import TrainProgress
 from tests.fork.test_context_distillation_cpu import build as build_cd
 from tests.fork.test_context_distillation_cpu import fake_encode
@@ -33,16 +34,16 @@ def write_prompts(tmp, prompts):
     return path
 
 
-def build(tmp, prompts, kind="smd", batch_size=1, **overrides):
+def build(tmp, prompts, batch_size=1, **overrides):
     # reuse the context distillation test setup (tiny model with a LoRA, fake trainer), then switch the block
     config, model, trainer, _ = build_cd(tmp, [{"student": "x", "teacher": "y"}], batch_size=batch_size)
     config.context_distillation.enabled = False
-    block = config.smd_distillation if kind == "smd" else config.cfg_distillation
+    block = config.smd_distillation
     block.enabled = True
     block.prompts_path = write_prompts(tmp, prompts)
     for k, v in overrides.items():
         setattr(block, k, v)
-    ext = SmdDistillation(config) if kind == "smd" else CfgDistillation(config)
+    ext = SmdDistillation(config)
     return config, model, trainer, ext
 
 
@@ -149,10 +150,11 @@ def student_vs_teacher(ext, trainer, conditioning, noise, teacher_steps, cfg):
 
 
 def test_learning():
-    for kind in ("smd", "cfg"):
+    for kind in ("few-step", "cfg-only"):
         with tempfile.TemporaryDirectory() as tmp:
-            overrides = {"student_steps": 2, "teacher_cfg": 3.0} if kind == "smd" else {"steps": 6, "teacher_cfg": 3.0}
-            config, model, trainer, ext = build(tmp, [{"prompt": "a red house"}], kind=kind, **overrides)
+            overrides = {"student_steps": 2, "teacher_cfg": 3.0} if kind == "few-step" else \
+                {"student_steps": 6, "teacher_cfg": 3.0, "repulsion_weight": 0.0}
+            config, model, trainer, ext = build(tmp, [{"prompt": "a red house"}], **overrides)
             ext.on_train_start(trainer)
             ext.on_epoch_start(trainer, TrainProgress())
             conditioning = torch.load(ext.entry_paths[0], weights_only=True)

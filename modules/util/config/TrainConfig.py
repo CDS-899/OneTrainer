@@ -5,7 +5,6 @@ from copy import deepcopy
 from typing import Any
 
 from modules.util.config.BaseConfig import BaseConfig
-from modules.util.config.CfgDistillationConfig import CfgDistillationConfig
 from modules.util.config.CloudConfig import CloudConfig
 from modules.util.config.ConceptConfig import ConceptConfig
 from modules.util.config.ContextDistillationConfig import ContextDistillationConfig
@@ -499,7 +498,6 @@ class TrainConfig(BaseConfig):
     depth_anchor: DepthAnchorConfig
     soar: SoarConfig
     smd_distillation: SmdDistillationConfig
-    cfg_distillation: CfgDistillationConfig
 
     # text encoder
     text_encoder: TrainModelPartConfig
@@ -1186,7 +1184,6 @@ class TrainConfig(BaseConfig):
         data.append(("depth_anchor", DepthAnchorConfig.default_values(), DepthAnchorConfig, False))
         data.append(("soar", SoarConfig.default_values(), SoarConfig, False))
         data.append(("smd_distillation", SmdDistillationConfig.default_values(), SmdDistillationConfig, False))
-        data.append(("cfg_distillation", CfgDistillationConfig.default_values(), CfgDistillationConfig, False))
 
         # text encoder
         text_encoder = TrainModelPartConfig.default_values()
