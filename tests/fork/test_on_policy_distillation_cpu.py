@@ -199,6 +199,8 @@ def test_standalone_training():
                 assert torch.equal(v, base[k]), k
         tb = trainer.tensorboard.scalars
         assert "loss/smd_distillation" in tb and "smd_distillation/repulsion_distance" in tb, tb.keys()
+        assert "smd_distillation/loss_step_1" in tb and "smd_distillation/loss_step_2" in tb, tb.keys()
+        assert "smd_distillation/loss_low_noise" in tb, tb.keys()  # the last step trains down to noise 0
     print("standalone training OK")
 
 

@@ -126,6 +126,8 @@ class OnPolicyDistillation(TrainingExtension):
         self.band_loss = NoiseBandLoss(name, f"loss/{name}")
         self._repulsion_sum = 0.0
         self._repulsion_count = 0
+        self._step_loss: dict[int, float] = {}
+        self._step_count: dict[int, float] = {}
 
     def is_standalone(self) -> bool:
         return True
@@ -262,11 +264,11 @@ class OnPolicyDistillation(TrainingExtension):
             return t.view(-1, *([1] * (x.dim() - 1)))
 
         loss = 0.0
-        imitation_total = torch.zeros(batch_size, device=device)
         for _ in range(self.queries):
             tau = torch.rand(batch_size, generator=self.generator, device=self.generator.device).to(device)
             query = x - b(tau * delta) * detached
-            target, negative = self._teacher(trainer, query, sigma_i - tau * delta, conditioning)
+            query_sigma = sigma_i - tau * delta
+            target, negative = self._teacher(trainer, query, query_sigma, conditioning)
             imitation = velocity_distance(velocity, target)
             term = imitation
             if self.repulsion_weight > 0:
@@ -275,9 +277,11 @@ class OnPolicyDistillation(TrainingExtension):
                 self._repulsion_sum += float(repulsion.detach().mean())
                 self._repulsion_count += 1
             loss = loss + term.mean()
-            imitation_total += imitation.detach()
-
-        self.band_loss.record(imitation_total / self.queries, sigma_i.expand(batch_size))
+            # logged at the noise level where the teacher was asked (a few-step schedule has no step that
+            # starts at low noise, but its last step trains down to 0)
+            self.band_loss.record(imitation.detach(), query_sigma)
+            self._step_loss[i] = self._step_loss.get(i, 0.0) + float(imitation.detach().mean()) / self.queries
+            self._step_count[i] = self._step_count.get(i, 0) + 1 / self.queries
 
         # continue the student's own trajectory
         trajectory['latents'] = (x - delta * detached).detach()
@@ -289,6 +293,11 @@ class OnPolicyDistillation(TrainingExtension):
 
     def report_to_tensorboard(self, tensorboard: SummaryWriter, global_step: int):
         self.band_loss.report(tensorboard, global_step)
+        if self.steps <= 8:
+            # per student step (1 = the first step from pure noise); for many steps the noise bands suffice
+            for i, total in self._step_loss.items():
+                tensorboard.add_scalar(f"{self.name}/loss_step_{i + 1}", total / self._step_count[i], global_step)
+        self._step_loss, self._step_count = {}, {}
         if self._repulsion_count > 0:
             tensorboard.add_scalar(f"{self.name}/repulsion_distance", self._repulsion_sum / self._repulsion_count,
                                    global_step)

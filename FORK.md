@@ -321,7 +321,8 @@ learning rate 1e-4, rank-256 LoRA. Preset: `#anima LoRA smd distillation`.
 ### What to watch
 
 - `loss/smd_distillation` and its noise bands: the distance between the student's and the
-  teacher's velocity. The high-noise band decides composition.
+  teacher's velocity, by the noise level where the teacher was asked. The high-noise band decides composition.
+- `smd_distillation/loss_step_N` (up to 8 student steps): the same per student step, 1 = the first step from noise.
 - `smd_distillation/repulsion_distance`: distance from the negative-prompt prediction; it should grow a little.
 - Samples at the student's step count and CFG 1.
 
