@@ -101,12 +101,18 @@ def bucket_resolutions(target: int, quantization: int) -> list[tuple[int, int]]:
     return sorted(resolutions)
 
 
-def resolve_bucket(pair: PromptPair, resolution: str, quantization: int, seed: int) -> tuple[int, int]:
+def resolve_bucket_for(
+        key: str,
+        ar: tuple[float, float] | None,
+        resolution: str,
+        quantization: int,
+        seed: int,
+) -> tuple[int, int]:
     """
-    The (height, width) a pair is trained at. resolution uses the training resolution format:
-      "768x512"   fixed size (width x height) for every pair, "ar" is ignored
-      "512"       square, or the OneTrainer bucket nearest to the pair's "ar"
-      "512,1024"  as above, each pair gets one of the targets (fixed per pair)
+    The (height, width) a prompt is trained at. resolution uses the training resolution format:
+      "768x512"   fixed size (width x height) for every prompt, "ar" is ignored
+      "512"       square, or the OneTrainer bucket nearest to the prompt's "ar"
+      "512,1024"  as above, each prompt gets one of the targets (fixed per prompt, chosen by key)
     """
     resolution = resolution.strip()
     if "x" in resolution and "," not in resolution:
@@ -114,14 +120,17 @@ def resolve_bucket(pair: PromptPair, resolution: str, quantization: int, seed: i
         return _quantize(height, quantization), _quantize(width, quantization)
 
     targets = [int(v.strip()) for v in resolution.split(",") if v.strip()]
-    target = targets[0] if len(targets) == 1 else \
-        random.Random(f"{seed}:{pair.student}:{pair.teacher}").choice(targets)
-    if pair.ar is None:
+    target = targets[0] if len(targets) == 1 else random.Random(f"{seed}:{key}").choice(targets)
+    if ar is None:
         size = _quantize(target, quantization)
         return size, size
 
-    aspect = pair.ar[1] / pair.ar[0]  # height / width
+    aspect = ar[1] / ar[0]  # height / width
     return min(bucket_resolutions(target, quantization), key=lambda hw: abs(hw[0] / hw[1] - aspect))
+
+
+def resolve_bucket(pair: PromptPair, resolution: str, quantization: int, seed: int) -> tuple[int, int]:
+    return resolve_bucket_for(f"{pair.student}:{pair.teacher}", pair.ar, resolution, quantization, seed)
 
 
 class ContextDistillation(TrainingExtension):

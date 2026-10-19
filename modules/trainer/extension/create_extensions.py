@@ -17,6 +17,14 @@ def create_training_extensions(config: TrainConfig) -> list[TrainingExtension]:
         from modules.trainer.extension.Soar import Soar
         extensions.append(Soar(config))
 
+    if config.smd_distillation.enabled:
+        from modules.trainer.extension.OnPolicyDistillation import SmdDistillation
+        extensions.append(SmdDistillation(config))
+
+    if config.cfg_distillation.enabled:
+        from modules.trainer.extension.OnPolicyDistillation import CfgDistillation
+        extensions.append(CfgDistillation(config))
+
     if sum(ext.is_standalone() for ext in extensions) > 1:
         raise ValueError("Only one training extension can run in standalone mode")
 

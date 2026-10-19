@@ -12,6 +12,8 @@ usual; see the [upstream README](https://github.com/Nerogar/OneTrainer#readme) a
   and cost likeness, so it is off by default.
 - **SOAR** (experimental): the model also learns to recover from its own sampling steps (Tencent HY-SOAR), as an
   addition to normal image training.
+- **SMD and CFG distillation**: prompt-only distillation of a LoRA that samples in 4 steps at CFG 1 (SMD, without
+  its Pivot head), or at the normal step count without CFG.
 - **Sample prompt cache**: sampling during training reuses text embeddings of prompts it has already encoded.
 - **Trainer extensions**: a small hook system in `GenericTrainer` that the features above plug into. Plain LoRA and
   fine-tune training is unchanged.
