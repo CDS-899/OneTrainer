@@ -130,6 +130,25 @@ def test_trajectory_and_teacher():
     print("trajectory and teacher OK")
 
 
+def test_student_shift():
+    with tempfile.TemporaryDirectory() as tmp:
+        config, model, trainer, ext = build(tmp, [{"prompt": "a cat"}], student_steps=4, student_shift=1.5)
+        ext.on_train_start(trainer)
+        # shift * t / (1 + (shift - 1) * t) at t = 1, 0.75, 0.5, 0.25, then 0 (ComfyUI: "simple" + the same shift)
+        t = torch.tensor([1.0, 0.75, 0.5, 0.25])
+        expected = torch.cat([1.5 * t / (1 + 0.5 * t), torch.zeros(1)])
+        assert torch.allclose(ext.schedule.cpu(), expected, atol=1e-4), ext.schedule
+        # the model's own sampler (used for OneTrainer's samples) follows the same schedule
+        assert ext.adapter.sampling_shift() == 1.5
+        assert torch.allclose(ext.adapter.sampling_sigmas(4).cpu(), expected, atol=1e-4)
+
+        # 0 keeps the model's own shift (3 in the test model)
+        config2, model2, trainer2, ext2 = build(tmp, [{"prompt": "a cat"}], student_steps=4)
+        ext2.on_train_start(trainer2)
+        assert torch.allclose(ext2.schedule.cpu(), torch.tensor([1.0, 0.9, 0.75, 0.5, 0.0]), atol=1e-4), ext2.schedule
+    print("student shift OK")
+
+
 def student_vs_teacher(ext, trainer, conditioning, noise, teacher_steps, cfg):
     adapter = ext.adapter
     with torch.no_grad():
@@ -207,6 +226,7 @@ def test_standalone_training():
 if __name__ == "__main__":
     test_prompt_file()
     test_trajectory_and_teacher()
+    test_student_shift()
     test_learning()
     test_standalone_training()
     print("ALL OK")

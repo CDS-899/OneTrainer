@@ -284,8 +284,15 @@ by under 1%).
 it is CFG-only distillation: same steps and look, 2x faster sampling (set `repulsion_weight: 0` for a plain copy of
 the teacher).
 
-Sample the result with Euler, the same step count and CFG 1 (set the sample settings accordingly; in ComfyUI use the
-model's normal schedule). The training is standalone (no image data set); batch size and epochs come from the main
+Sample the result with Euler, the same step count, CFG 1 **and the same schedule** (set the sample settings
+accordingly). The student learns jumps between fixed noise levels; a different schedule (another scheduler or shift)
+gives splotchy or grainy results. The schedule is printed at the start of training. For Anima in ComfyUI:
+ModelSamplingAuraFlow with the training's shift, scheduler `simple`, sampler `euler`.
+
+`student_shift` sets that schedule. With the model's own shift (Anima: 3) the 4 steps start at 1.0, 0.9, 0.75, 0.5, so
+the last step jumps from half noise to the final image in one go and leaves grain. With 1.5 they start at 1.0, 0.82,
+0.6, 0.33 (the SMD paper's grid has a similarly short last step). OneTrainer's samples during the training use the
+same shift. The training is standalone (no image data set); batch size and epochs come from the main
 settings. Requires LoRA training.
 
 ### Prompt file
@@ -308,6 +315,7 @@ Prompts are encoded once and cached in `<cache dir>/smd_distillation/` (about 1 
 | `prompts_path` | `""` | Prompt file |
 | `resolution` | `""` | Same format as the training resolution; empty = the training resolution |
 | `student_steps` | `4` | Sampling steps of the distilled LoRA |
+| `student_shift` | `0` | Timestep shift of the student's schedule; 0 = the model's own (Anima: 3). Sample with the same |
 | `teacher_cfg` | `5.0` | Teacher CFG (paper: 5 for Qwen-Image) |
 | `repulsion_weight` | `0.2` | Push away from the teacher's negative-prompt prediction (paper: 0.2) |
 | `queries` | `2` | Teacher queries per student step |

@@ -143,6 +143,20 @@ class FlowModelAdapter(metaclass=ABCMeta):
         # same mapping as ModelSetupFlowMatchingMixin._add_noise_discrete
         return (timestep.float() + 1.0) / num_train_timesteps
 
+    def sampling_shift(self) -> float:
+        """The static timestep shift of the model's inference schedule."""
+        return float(self.model.noise_scheduler.shift)
+
+    def set_sampling_shift(self, shift: float):
+        """Changes the static timestep shift of the model's inference schedule (used by its sampler)."""
+        scheduler = self.model.noise_scheduler
+        if scheduler.config.get("use_dynamic_shifting", False):
+            raise ValueError("a fixed sampling shift needs a scheduler without dynamic shifting")
+        if hasattr(scheduler, "set_shift"):
+            scheduler.set_shift(shift)
+        else:
+            scheduler._shift = shift
+
     def sampling_sigmas(self, steps: int) -> Tensor:
         """Noise levels of the model's own inference schedule (including the final 0), as used by its sampler."""
         scheduler = copy.deepcopy(self.model.noise_scheduler)

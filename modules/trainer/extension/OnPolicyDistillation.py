@@ -89,6 +89,7 @@ class OnPolicyDistillation(TrainingExtension):
             name: str,
             block,
             steps: int,
+            shift: float,
             teacher_cfg: float,
             repulsion_weight: float,
             queries: int,
@@ -97,12 +98,15 @@ class OnPolicyDistillation(TrainingExtension):
         self.name = name
         self.block = block
         self.steps = steps
+        self.shift = shift
         self.teacher_cfg = teacher_cfg
         self.repulsion_weight = repulsion_weight
         self.queries = queries
 
         if config.training_method != TrainingMethod.LORA:
             raise NotImplementedError(f"{name} needs LoRA training: the teacher is the base model with the LoRA off")
+        if shift < 0:
+            raise ValueError(f"{name}: shift must be 0 (the model's own) or positive")
         if steps < 1 or queries < 1:
             raise ValueError(f"{name}: steps and queries must be at least 1")
         if not 0.0 <= repulsion_weight < 1.0:
@@ -149,6 +153,9 @@ class OnPolicyDistillation(TrainingExtension):
         model = trainer.model
         self.adapter = create_flow_model_adapter(model, trainer.model_setup, self.config, trainer.train_device)
         self.generator = torch.Generator(device=trainer.train_device)
+        if self.shift > 0:
+            # also changes OneTrainer's own sampling during this training, so its samples use the student's schedule
+            self.adapter.set_sampling_shift(self.shift)
         self.schedule = self.adapter.sampling_sigmas(self.steps)
 
         if self.config.clear_cache_before_training and self.config.latent_caching and os.path.isdir(self.cache_dir):
@@ -171,6 +178,9 @@ class OnPolicyDistillation(TrainingExtension):
             raise ValueError(f"{self.name}: no bucket has at least batch size ({self.batch_size}) prompts")
         print(f"{self.name}: {len(self.prompts)} prompts in {len(set(self.buckets))} buckets, "
               f"{self.steps} student steps, teacher CFG {self.teacher_cfg}")
+        print(f"{self.name}: student schedule (noise level at each step start, then 0): "
+              f"{', '.join(f'{float(s):.3f}' for s in self.schedule)}. Sample with Euler, {self.steps} steps, CFG 1, "
+              f"shift {self.adapter.sampling_shift():g} (ComfyUI: ModelSamplingAuraFlow, scheduler \"simple\")")
 
     @torch.no_grad()
     def _encode(self, trainer: "GenericTrainer", missing: list[int], negative_path: str):
@@ -312,5 +322,5 @@ class SmdDistillation(OnPolicyDistillation):
 
     def __init__(self, config: TrainConfig):
         block = config.smd_distillation
-        super().__init__(config, "smd_distillation", block, block.student_steps, block.teacher_cfg,
-                         block.repulsion_weight, block.queries)
+        super().__init__(config, "smd_distillation", block, block.student_steps, block.student_shift,
+                         block.teacher_cfg, block.repulsion_weight, block.queries)

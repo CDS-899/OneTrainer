@@ -13,6 +13,7 @@ class SmdDistillationConfig(BaseConfig):
     prompts_path: str
     resolution: str
     student_steps: int
+    student_shift: float
     teacher_cfg: float
     repulsion_weight: float
     queries: int
@@ -32,6 +33,10 @@ class SmdDistillationConfig(BaseConfig):
         # sampling steps of the distilled student (Euler, the model's own schedule, CFG 1).
         # Your normal step count = CFG-only distillation
         data.append(("student_steps", 4, int, False))
+        # timestep shift of the student's schedule; 0 = the model's own (Anima: 3). A lower shift makes the last step
+        # shorter (less leftover noise / grain). Sample with the same shift (ComfyUI: ModelSamplingAuraFlow, scheduler
+        # "simple"). Also used for OneTrainer's samples during this training.
+        data.append(("student_shift", 0.0, float, False))
         # CFG of the teacher target, against negative_prompt
         data.append(("teacher_cfg", 5.0, float, False))
         # push the student away from the teacher's negative-prompt prediction (paper: 0.2)
